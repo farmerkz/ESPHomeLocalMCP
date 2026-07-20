@@ -1,0 +1,11 @@
+services:
+  esphome-mcp:
+    build: .
+    container_name: esphome-mcp
+    restart: unless-stopped
+    init: true
+    # Поддерживаем контейнер в активном состоянии для приема команд
+    command: ["sleep", "infinity"]
+    # Обеспечиваем доступ к localhost хоста для Apple Silicon
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
