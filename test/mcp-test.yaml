@@ -1,0 +1,29 @@
+# Board: Generic ESP32 Board (Generic)
+# Definition: definitions/boards/generic-esp32/manifest.yaml
+
+esphome:
+  name: test-mcp
+  friendly_name: test-mcp
+
+esp32:
+  variant: esp32
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: "iSzef2k+vM0l8f8yAdpJNiw1qCuL8jJWPcCtxn10cF4="
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: test-mcp Fallback Hotspot
+    password: "xjuU7cZjfocM"
+
+captive_portal:

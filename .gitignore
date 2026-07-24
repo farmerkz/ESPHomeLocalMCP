@@ -4,8 +4,9 @@
 # Не игнорировать .git и .gitignore
 !.git
 !.gitignore
-
 !.cursorrules
+!.agents
 
 # Виртуальное окружение Python
 .venv/
+__pycache__/
