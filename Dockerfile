@@ -1,3 +1,6 @@
+# [DEPRECATED] Этот Dockerfile оставлен для справки.
+# Текущий способ запуска — через Python venv. См. setup.sh и README.md.
+
 FROM python:3.11-slim
 
 WORKDIR /app

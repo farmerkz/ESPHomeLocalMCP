@@ -1,3 +1,6 @@
+# [DEPRECATED] Этот файл оставлен для справки.
+# Текущий способ запуска — через Python venv. См. setup.sh и README.md.
+
 services:
   esphome-mcp:
     build: .

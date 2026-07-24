@@ -1,6 +1,6 @@
 # ESPHome Local MCP Server
 
-Локальный сервер протокола MCP (Model Context Protocol) для интеграции **ESPHome Device Builder** с AI-ассистентами (Cursor, VS Code Copilot, Claude Desktop). 
+Локальный сервер протокола MCP (Model Context Protocol) для интеграции **ESPHome Device Builder** с AI-ассистентами (Cursor, VS Code Copilot, Claude Desktop, Antigravity). 
 
 Позволяет языковым моделям (LLM) автономно валидировать, компилировать и прошивать (OTA) конфигурации ESPHome напрямую в локальной среде разработчика.
 
@@ -29,54 +29,77 @@
 4. **`compile_and_flash(configuration, host)`**
    Полный цикл: генерация C++, сборка и последующая заливка по воздуху (OTA). Использует API `firmware/install`.
 
-*Параметр `host` по умолчанию равен `host.docker.internal`, что позволяет Docker-контейнеру обращаться к локальному хосту MacOS/Windows.*
+*Параметр `host` по умолчанию равен `localhost`, что соответствует адресу локального ESPHome Device Builder.*
 
 ## 🚀 Установка и Запуск
 
-Сервер работает в Docker-контейнере для изоляции окружения (Python 3.11).
+Сервер запускается напрямую из Python-виртуального окружения (venv) — без Docker.
 
-### 1. Сборка и запуск контейнера
+### 1. Установка
 
 ```bash
 cd ESPHomeLocalMCP
-docker-compose up -d --build
+bash setup.sh
 ```
 
-### 2. Подключение в Cursor / VS Code (Cline / Copilot)
+Скрипт создаст папку `.venv/` и установит зависимости (`mcp`, `websockets`).
+
+### 2. Подключение в Cursor / VS Code (Cline / Copilot) / Claude Desktop
 
 Добавьте следующую конфигурацию в настройки MCP-серверов вашего редактора:
 
 ```json
 {
   "mcpServers": {
-    "esphome-devic": {
-      "command": "docker",
+    "esphome-local": {
+      "command": "/ПОЛНЫЙ/ПУТЬ/К/ESPHomeLocalMCP/.venv/bin/python",
       "args": [
-        "exec",
-        "-i",
-        "esphome-mcp",
-        "python",
         "-u",
-        "/app/server.py"
+        "/ПОЛНЫЙ/ПУТЬ/К/ESPHomeLocalMCP/server.py"
       ]
     }
   }
 }
 ```
 
-> **Важно:** Флаги `-i` (интерактивный режим) и `-u` (unbuffered output для Python) обязательны для корректной работы stdio транспорта протокола MCP.
+> **Важно:** Укажите абсолютный путь до проекта. Флаг `-u` (unbuffered output для Python) обязателен для корректной работы stdio транспорта протокола MCP.
+
+### 3. Подключение в Antigravity (mcp_config.json)
+
+```json
+{
+  "mcpServers": {
+    "esphome-local": {
+      "command": "/ПОЛНЫЙ/ПУТЬ/К/ESPHomeLocalMCP/.venv/bin/python",
+      "args": [
+        "-u",
+        "/ПОЛНЫЙ/ПУТЬ/К/ESPHomeLocalMCP/server.py"
+      ]
+    }
+  }
+}
+```
 
 ## 🏗 Архитектура
 
 - **Транспорт:** `stdio` (стандартный ввод-вывод) — стандарт для локальных MCP-серверов.
 - **Фреймворк:** `mcp.server.fastmcp.FastMCP` (официальный Python SDK).
+- **Окружение:** Python venv (`.venv/`), зависимости: `mcp`, `websockets`.
 - **Связь с ESPHome:** Библиотека `websockets`. Запросы отправляются в виде JSON-RPC сообщений, совместимых с новым протоколом ESPHome Device Builder API (обертка параметров в `args`, ожидание потока `output` и события `result`).
 
 ## 📝 Логирование и отладка
 
 Сервер настроен на перенаправление всех логов в `stderr` (`sys.stderr`), так как `stdout` зарезервирован исключительно для передачи MCP-протокола.
-Для просмотра внутренних логов сервера выполните:
 
+Для просмотра логов в реальном времени (при ручном запуске):
 ```bash
-docker logs -f esphome-mcp
+.venv/bin/python -u server.py 2>mcp_debug.log
 ```
+
+## 📦 Зависимости
+
+Зависимости перечислены в `requirements.txt`:
+- `mcp` — официальный Python SDK для Model Context Protocol
+- `websockets` — асинхронная работа с WebSocket-соединениями
+
+> **Примечание:** Файлы `Dockerfile` и `docker-compose.yaml` сохранены в репозитории с пометкой `[DEPRECATED]` для исторической справки. Они больше не используются.

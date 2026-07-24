@@ -6,3 +6,6 @@
 !.gitignore
 
 !.cursorrules
+
+# Виртуальное окружение Python
+.venv/

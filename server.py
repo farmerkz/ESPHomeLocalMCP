@@ -143,25 +143,25 @@ async def execute_ws_command(host: str, command_type: str, args: dict) -> str:
 # ==========================================
 
 @mcp.tool()
-async def validate_yaml(configuration: str, host: str = "host.docker.internal") -> str:
+async def validate_yaml(configuration: str, host: str = "localhost") -> str:
     """Инструмент 1: Только валидация YAML конфигурации."""
     if configuration.startswith("config/"): configuration = configuration[7:]
     return await execute_ws_command(host, "devices/validate", {"configuration": configuration})
 
 @mcp.tool()
-async def compile_firmware(configuration: str, host: str = "host.docker.internal") -> str:
+async def compile_firmware(configuration: str, host: str = "localhost") -> str:
     """Инструмент 2: Только компиляция прошивки без загрузки."""
     if configuration.startswith("config/"): configuration = configuration[7:]
     return await execute_ws_command(host, "firmware/compile", {"configuration": configuration})
 
 @mcp.tool()
-async def flash_ota(configuration: str, host: str = "host.docker.internal") -> str:
+async def flash_ota(configuration: str, host: str = "localhost") -> str:
     """Инструмент 3: Только OTA-прошивка готового бинарника."""
     if configuration.startswith("config/"): configuration = configuration[7:]
     return await execute_ws_command(host, "firmware/upload", {"configuration": configuration, "port": "OTA"})
 
 @mcp.tool()
-async def compile_and_flash(configuration: str, host: str = "host.docker.internal") -> str:
+async def compile_and_flash(configuration: str, host: str = "localhost") -> str:
     """Инструмент 4: Полный цикл (Компиляция + OTA-Прошивка)."""
     if configuration.startswith("config/"): configuration = configuration[7:]
     return await execute_ws_command(host, "firmware/install", {"configuration": configuration, "port": "OTA"})

@@ -8,8 +8,8 @@
 
 **Ключевые особенности:**
 - **Транспорт:** `stdio` (стандартный ввод-вывод).
-- **Стек:** Python 3.11, библиотека `mcp.server.fastmcp`, `websockets`.
-- **Интеграция:** Подключается к ESPHome API по WebSocket (`ws://<host>:6052/ws`).
+- **Стек:** Python 3.11, библиотека `mcp.server.fastmcp`, `websockets`. Окружение — Python venv (`.venv/`).
+- **Интеграция:** Подключается к ESPHome API по WebSocket (`ws://<host>:6052/ws`). Значение `host` по умолчанию — `localhost`.
 - **Инструменты (Tools):** 
   - `validate_yaml` (проверка синтаксиса)
   - `compile_firmware` (сборка без прошивки)
