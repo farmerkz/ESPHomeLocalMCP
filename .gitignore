@@ -4,3 +4,5 @@
 # Не игнорировать .git и .gitignore
 !.git
 !.gitignore
+
+!.cursorrules

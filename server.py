@@ -18,7 +18,7 @@ def clean_ansi(text):
     ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     return ansi_escape.sub('', text)
 
-async def execute_ws_command(host: str, command_type: str, configuration: str) -> str:
+async def execute_ws_command(host: str, command_type: str, args: dict) -> str:
     url = f"ws://{host}:6052/ws"
     output_log = []
     request_id = "1"
@@ -27,15 +27,18 @@ async def execute_ws_command(host: str, command_type: str, configuration: str) -
     
     try:
         async with websockets.connect(url, ping_interval=None) as ws:
-            # Сначала нужно пропустить ServerInfoMessage, если он есть
-            first_msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            # Сначала читаем ServerInfoMessage
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
             
             # Если команда валидации, формат простой
             if command_type == "devices/validate":
                 await ws.send(json.dumps({
                     "command": command_type,
                     "message_id": request_id,
-                    "args": {"configuration": configuration}
+                    "args": args
                 }))
                 
                 async for message in ws:
@@ -70,7 +73,7 @@ async def execute_ws_command(host: str, command_type: str, configuration: str) -
                 await ws.send(json.dumps({
                     "command": command_type,
                     "message_id": request_id,
-                    "args": {"configuration": configuration}
+                    "args": args
                 }))
                 
                 job_id = None
@@ -143,25 +146,25 @@ async def execute_ws_command(host: str, command_type: str, configuration: str) -
 async def validate_yaml(configuration: str, host: str = "host.docker.internal") -> str:
     """Инструмент 1: Только валидация YAML конфигурации."""
     if configuration.startswith("config/"): configuration = configuration[7:]
-    return await execute_ws_command(host, "devices/validate", configuration)
+    return await execute_ws_command(host, "devices/validate", {"configuration": configuration})
 
 @mcp.tool()
 async def compile_firmware(configuration: str, host: str = "host.docker.internal") -> str:
     """Инструмент 2: Только компиляция прошивки без загрузки."""
     if configuration.startswith("config/"): configuration = configuration[7:]
-    return await execute_ws_command(host, "firmware/compile", configuration)
+    return await execute_ws_command(host, "firmware/compile", {"configuration": configuration})
 
 @mcp.tool()
 async def flash_ota(configuration: str, host: str = "host.docker.internal") -> str:
     """Инструмент 3: Только OTA-прошивка готового бинарника."""
     if configuration.startswith("config/"): configuration = configuration[7:]
-    return await execute_ws_command(host, "firmware/upload", configuration)
+    return await execute_ws_command(host, "firmware/upload", {"configuration": configuration, "port": "OTA"})
 
 @mcp.tool()
 async def compile_and_flash(configuration: str, host: str = "host.docker.internal") -> str:
     """Инструмент 4: Полный цикл (Компиляция + OTA-Прошивка)."""
     if configuration.startswith("config/"): configuration = configuration[7:]
-    return await execute_ws_command(host, "firmware/install", configuration)
+    return await execute_ws_command(host, "firmware/install", {"configuration": configuration, "port": "OTA"})
 
 if __name__ == "__main__":
     mcp.run(transport='stdio')
