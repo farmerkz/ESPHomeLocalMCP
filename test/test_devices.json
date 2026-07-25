@@ -1,0 +1,27 @@
+{
+  "_description": "Манифест конфигураций устройств ESPHome для автоматизированного тестирования MCP-сервера. Используется адаптивным тест-ранером test/test_mcp_server.py.",
+  "version": "1.0",
+  "devices": [
+    {
+      "configuration": "test.yaml",
+      "description": "Базовый тестовый модуль ESP32 с минимальной конфигурацией датчиков и компонентов для валидации и ускоренной компиляции.",
+      "allow_compile": true,
+      "allow_ota_flash": true,
+      "allow_state_mutation": true
+    },
+    {
+      "configuration": "liligo-t-internet.yaml",
+      "description": "Плата LilyGO T-Internet-POE (ESP32) с поддержкой Ethernet (LAN8720) и питанием Power over Ethernet.",
+      "allow_compile": true,
+      "allow_ota_flash": false,
+      "allow_state_mutation": false
+    },
+    {
+      "configuration": "esp32-c6-lora-test-01.yaml",
+      "description": "Контроллер на базе ESP32-C6 RISC-V с трансивером LoRa (SX1262/SX1276) для беспроводной связи.",
+      "allow_compile": true,
+      "allow_ota_flash": false,
+      "allow_state_mutation": false
+    }
+  ]
+}

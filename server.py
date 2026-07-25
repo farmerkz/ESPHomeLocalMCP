@@ -109,108 +109,28 @@ def clean_ansi(text: str) -> str:
     ansi_escape = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
     return ansi_escape.sub('', text)
 
-def resolve_configuration(configuration: str) -> tuple[str, str | None]:
+def resolve_configuration(configuration: str) -> str:
     """
-    Нормализует параметр configuration.
+    Нормализует параметр configuration для передачи в ESPHome API.
     
-    Возвращает кортеж (config_name, file_content):
-      - config_name: имя файла для передачи в ESPHome API
-      - file_content: содержимое файла (только для абсолютных путей),
-                      None — если файл уже должен быть в конфиг-директории ESPHome
+    Возвращает имя конфигурации (config_name) для ESPHome API.
+    Вся информация обрабатывается исключительно через ESPHome API без доступа к локальным файлам.
     
     Правила:
-      - "config/foo.yaml"    → ("foo.yaml", None)  — обрезаем префикс config/
-      - "foo.yaml"           → ("foo.yaml", None)  — уже корректное имя
-      - "/abs/path/foo.yaml" → ("foo.yaml", <содержимое файла>)  — абсолютный путь
+      - "config/foo.yaml" → "foo.yaml"  — обрезаем префикс config/
+      - "foo.yaml"        → "foo.yaml"  — имя конфигурации в ESPHome API
     """
     # Убираем префикс config/
     if configuration.startswith("config/"):
         configuration = configuration[7:]
 
-    # Если путь абсолютный — читаем содержимое файла с диска
-    if os.path.isabs(configuration):
-        config_name = os.path.basename(configuration)
-        logger.info(f"Абсолютный путь обнаружен: {configuration!r} → имя файла: {config_name!r}")
-        try:
-            with open(configuration, "r", encoding="utf-8") as f:
-                file_content = f.read()
-        except OSError as e:
-            raise ValueError(f"Не удалось прочитать файл {configuration!r}: {e}")
-        return config_name, file_content
-
-    # Относительный путь — передаём как есть
-    return configuration, None
-
-
-async def create_temp_config(ws, file_content: str) -> str:
-    """
-    Создаёт временный конфиг в ESPHome через devices/create с file_content.
-    Возвращает реальное имя созданного временного файла (из ответа API).
-    """
-    # Используем дефисы: ESPHome slugify убирает подчёркивания в начале имени
-    tmp_name = f"mcp-tmp-{uuid.uuid4().hex[:8]}"
-    msg_id = "tmp_create"
-
-    logger.info(f"Создаём временный конфиг ESPHome с именем: {tmp_name!r}")
-    await ws.send(json.dumps({
-        "command": "devices/create",
-        "message_id": msg_id,
-        "args": {
-            "name": tmp_name,
-            "file_content": file_content,
-            "overwrite": True,
-        }
-    }))
-
-    # Ждём подтверждения создания
-    async for message in ws:
-        data = json.loads(message)
-        if data.get("message_id") != msg_id:
-            continue
-        if data.get("error_code"):
-            raise RuntimeError(f"Ошибка создания временного конфига: {data.get('details', data)}")
-        # ESPHome может slugify имя — берём реальное имя из ответа
-        real_name = data.get("result", {}).get("configuration", f"{tmp_name}.yaml")
-        logger.info(f"Временный конфиг создан успешно, реальное имя: {real_name!r}")
-        return real_name
-
-
-async def delete_config(ws, config_name: str) -> None:
-    """
-    Удаляет конфиг в ESPHome через devices/delete.
-    """
-    msg_id = "tmp_delete"
-    logger.info(f"Удаляем временный конфиг ESPHome: {config_name!r}")
-    await ws.send(json.dumps({
-        "command": "devices/delete",
-        "message_id": msg_id,
-        "args": {"configuration": config_name}
-    }))
-
-    # Ждём подтверждения удаления (не блокируем долго)
-    try:
-        async for message in ws:
-            data = json.loads(message)
-            if data.get("message_id") != msg_id:
-                continue
-            if data.get("error_code"):
-                logger.warning(f"Предупреждение при удалении {config_name!r}: {data.get('details', data)}")
-            else:
-                logger.info(f"Временный конфиг {config_name!r} удалён")
-            return
-    except Exception as e:
-        logger.warning(f"Не удалось подтвердить удаление {config_name!r}: {e}")
+    return configuration
 
 
 async def execute_ws_command(host: str, command_type: str, args: dict,
-                             file_content: str | None = None,
                              port: int | None = None) -> str:
     """
     Выполняет команду ESPHome WebSocket API.
-    
-    Если file_content задан — перед выполнением команды создаётся временный конфиг
-    в ESPHome через devices/create, после выполнения он удаляется (через devices/delete),
-    даже при ошибке (try/finally).
     """
     url = get_ws_url(host, port)
     output_log = []
@@ -226,122 +146,105 @@ async def execute_ws_command(host: str, command_type: str, args: dict,
             if first_msg.get("requires_auth"):
                 return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
 
-            # --- Если передан абсолютный путь: создаём временный конфиг ---
-            tmp_config_name: str | None = None
-            if file_content is not None:
-                try:
-                    tmp_config_name = await create_temp_config(ws, file_content)
-                except Exception as e:
-                    return f"Ошибка создания временного конфига: {e}"
-                # Подменяем имя конфига в args на временное
-                args = dict(args)
-                args["configuration"] = tmp_config_name
-
-            try:
-                # Если команда валидации, формат простой
-                if command_type == "devices/validate":
-                    await ws.send(json.dumps({
-                        "command": command_type,
-                        "message_id": request_id,
-                        "args": args
-                    }))
-                    
-                    async for message in ws:
-                        data = json.loads(message)
-                        
-                        if data.get("error_code") or data.get("type") == "error":
-                            logger.error(f"Ошибка API ESPHome: {data}")
-                            return f"Ошибка API ESPHome: {data.get('details', data)}"
-                        
-                        if data.get("message_id") == request_id:
-                            if data.get("event") == "output":
-                                # Для валидации data может быть как строкой, так и объектом (разные версии API)
-                                line_data = data.get("data", "")
-                                if isinstance(line_data, dict):
-                                    line = line_data.get("line", "").strip()
-                                else:
-                                    line = str(line_data).strip()
-                                if line:
-                                    output_log.append(clean_ansi(line))
-                            elif data.get("event") == "result":
-                                success = data.get("data", {}).get("success", False)
-                                status = "УСПЕШНО" if success else "ОШИБКА"
-                                
-                                lines_to_return = 15 if success else 60
-                                tail_logs = "\n".join(output_log[-lines_to_return:])
-                                
-                                logger.info(f"Команда {command_type} завершена. Статус: {status}")
-                                return f"Статус выполнения ({command_type}): {status}\n\nЛог процесса:\n{tail_logs}"
+            # Если команда валидации, формат простой
+            if command_type == "devices/validate":
+                await ws.send(json.dumps({
+                    "command": command_type,
+                    "message_id": request_id,
+                    "args": args
+                }))
                 
-                # Для остальных команд (compile, install и т.д.) процесс двухшаговый:
-                else:
-                    await ws.send(json.dumps({
-                        "command": command_type,
-                        "message_id": request_id,
-                        "args": args
-                    }))
+                async for message in ws:
+                    data = json.loads(message)
                     
-                    job_id = None
-                    while True:
-                        res = await ws.recv()
-                        data = json.loads(res)
-                        if data.get("error_code") or data.get("type") == "error":
-                            logger.error(f"Ошибка API ESPHome: {data}")
-                            return f"Ошибка API ESPHome: {data.get('details', data)}"
+                    if data.get("error_code") or data.get("type") == "error":
+                        logger.error(f"Ошибка API ESPHome: {data}")
+                        return f"Ошибка API ESPHome: {data.get('details', data)}"
+                    
+                    if data.get("message_id") == request_id:
+                        if data.get("event") == "output":
+                            # Для валидации data может быть как строкой, так и объектом (разные версии API)
+                            line_data = data.get("data", "")
+                            if isinstance(line_data, dict):
+                                line = line_data.get("line", "").strip()
+                            else:
+                                line = str(line_data).strip()
+                            if line:
+                                output_log.append(clean_ansi(line))
+                        elif data.get("event") == "result":
+                            success = data.get("data", {}).get("success", False)
+                            status = "УСПЕШНО" if success else "ОШИБКА"
                             
-                        if data.get("message_id") == request_id and "result" in data:
-                            if data["result"] is None:
-                                continue
-                            job_id = data["result"].get("job_id")
-                            break
+                            lines_to_return = 15 if success else 60
+                            tail_logs = "\n".join(output_log[-lines_to_return:])
                             
-                    if not job_id:
-                        return f"Не удалось получить job_id для команды {command_type}"
-                    
-                    logger.info(f"Получен job_id: {job_id}, подписываемся на логи...")
-                    
-                    follow_id = "2"
-                    await ws.send(json.dumps({
-                        "command": "firmware/follow_job",
-                        "message_id": follow_id,
-                        "args": {"job_id": job_id}
-                    }))
-                    
-                    async for message in ws:
-                        data = json.loads(message)
+                            logger.info(f"Команда {command_type} завершена. Статус: {status}")
+                            return f"Статус выполнения ({command_type}): {status}\n\nЛог процесса:\n{tail_logs}"
+            
+            # Для остальных команд (compile, install и т.д.) процесс двухшаговый:
+            else:
+                await ws.send(json.dumps({
+                    "command": command_type,
+                    "message_id": request_id,
+                    "args": args
+                }))
+                
+                job_id = None
+                while True:
+                    res = await ws.recv()
+                    data = json.loads(res)
+                    if data.get("error_code") or data.get("type") == "error":
+                        logger.error(f"Ошибка API ESPHome: {data}")
+                        return f"Ошибка API ESPHome: {data.get('details', data)}"
                         
-                        if data.get("message_id") == follow_id:
-                            event = data.get("event")
-                            
-                            if event == "output":
-                                line_data = data.get("data", "")
-                                if isinstance(line_data, dict):
-                                    line = line_data.get("line", "").strip()
-                                else:
-                                    line = str(line_data).strip()
-                                if line:
-                                    output_log.append(clean_ansi(line))
+                    if data.get("message_id") == request_id and "result" in data:
+                        if data["result"] is None:
+                            continue
+                        job_id = data["result"].get("job_id")
+                        break
+                        
+                if not job_id:
+                    return f"Не удалось получить job_id для команды {command_type}"
+                
+                logger.info(f"Получен job_id: {job_id}, подписываемся на логи...")
+                
+                follow_id = "2"
+                await ws.send(json.dumps({
+                    "command": "firmware/follow_job",
+                    "message_id": follow_id,
+                    "args": {"job_id": job_id}
+                }))
+                
+                async for message in ws:
+                    data = json.loads(message)
+                    
+                    if data.get("message_id") == follow_id:
+                        event = data.get("event")
+                        
+                        if event == "output":
+                            line_data = data.get("data", "")
+                            if isinstance(line_data, dict):
+                                line = line_data.get("line", "").strip()
+                            else:
+                                line = str(line_data).strip()
+                            if line:
+                                output_log.append(clean_ansi(line))
                                     
-                            elif event == "result":
-                                status_data = data.get("data", {})
-                                if isinstance(status_data, dict):
-                                    status_str = status_data.get("status")
-                                    success = (status_str == "completed" or status_data.get("success") == True)
-                                    status_text = "УСПЕШНО" if success else f"ОШИБКА ({status_str})"
-                                else:
-                                    success = True
-                                    status_text = "УСПЕШНО"
-                                    
-                                lines_to_return = 35 if success else 100
-                                tail_logs = "\n".join(output_log[-lines_to_return:])
+                        elif event == "result":
+                            status_data = data.get("data", {})
+                            if isinstance(status_data, dict):
+                                status_str = status_data.get("status")
+                                success = (status_str == "completed" or status_data.get("success") == True)
+                                status_text = "УСПЕШНО" if success else f"ОШИБКА ({status_str})"
+                            else:
+                                success = True
+                                status_text = "УСПЕШНО"
                                 
-                                logger.info(f"Команда {command_type} завершена. Статус: {status_text}")
-                                return f"Статус выполнения ({command_type}): {status_text}\n\nЛог процесса:\n{tail_logs}"
-
-            finally:
-                # --- Гарантированно удаляем временный конфиг ---
-                if tmp_config_name is not None:
-                    await delete_config(ws, tmp_config_name)
+                            lines_to_return = 35 if success else 100
+                            tail_logs = "\n".join(output_log[-lines_to_return:])
+                            
+                            logger.info(f"Команда {command_type} завершена. Статус: {status_text}")
+                            return f"Статус выполнения ({command_type}): {status_text}\n\nЛог процесса:\n{tail_logs}"
                             
     except Exception as e:
         error_msg = f"Критическая ошибка соединения с Device Builder API ({url}): {str(e)}"
@@ -355,16 +258,15 @@ async def execute_ws_command(host: str, command_type: str, args: dict,
 @mcp.tool()
 async def validate_yaml(configuration: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
     """
-    Инструмент 1: Только валидация YAML конфигурации.
+    Инструмент 1: Только валидация YAML конфигурации через ESPHome API.
     
     Параметр configuration принимает:
       - имя файла: "mcp-test.yaml"
       - относительный путь с префиксом: "config/mcp-test.yaml"
-      - абсолютный путь: "/Users/user/project/mcp-test.yaml"
     """
-    config_name, file_content = resolve_configuration(configuration)
+    config_name = resolve_configuration(configuration)
     return await execute_ws_command(host, "devices/validate",
-                                    {"configuration": config_name}, file_content, port=port)
+                                    {"configuration": config_name}, port=port)
 
 @mcp.tool()
 async def compile_firmware(configuration: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
@@ -374,11 +276,10 @@ async def compile_firmware(configuration: str, host: str = DEFAULT_HOST, port: i
     Параметр configuration принимает:
       - имя файла: "mcp-test.yaml"
       - относительный путь с префиксом: "config/mcp-test.yaml"
-      - абсолютный путь: "/Users/user/project/mcp-test.yaml"
     """
-    config_name, file_content = resolve_configuration(configuration)
+    config_name = resolve_configuration(configuration)
     return await execute_ws_command(host, "firmware/compile",
-                                    {"configuration": config_name}, file_content, port=port)
+                                    {"configuration": config_name}, port=port)
 
 @mcp.tool()
 async def flash_ota(configuration: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
@@ -388,11 +289,10 @@ async def flash_ota(configuration: str, host: str = DEFAULT_HOST, port: int = DE
     Параметр configuration принимает:
       - имя файла: "mcp-test.yaml"
       - относительный путь с префиксом: "config/mcp-test.yaml"
-      - абсолютный путь: "/Users/user/project/mcp-test.yaml"
     """
-    config_name, file_content = resolve_configuration(configuration)
+    config_name = resolve_configuration(configuration)
     return await execute_ws_command(host, "firmware/upload",
-                                    {"configuration": config_name, "port": "OTA"}, file_content, port=port)
+                                    {"configuration": config_name, "port": "OTA"}, port=port)
 
 @mcp.tool()
 async def compile_and_flash(configuration: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
@@ -402,11 +302,10 @@ async def compile_and_flash(configuration: str, host: str = DEFAULT_HOST, port: 
     Параметр configuration принимает:
       - имя файла: "mcp-test.yaml"
       - относительный путь с префиксом: "config/mcp-test.yaml"
-      - абсолютный путь: "/Users/user/project/mcp-test.yaml"
     """
-    config_name, file_content = resolve_configuration(configuration)
+    config_name = resolve_configuration(configuration)
     return await execute_ws_command(host, "firmware/install",
-                                    {"configuration": config_name, "port": "OTA"}, file_content, port=port)
+                                    {"configuration": config_name, "port": "OTA"}, port=port)
 
 # ==========================================
 # ФАЗА P0: ИНСТРУМЕНТЫ МОНИТОРИНГА И ОТЛАДКИ
@@ -500,12 +399,12 @@ async def stream_device_logs(configuration: str, port: str = "OTA", duration_sec
     Инструмент 6 (P0): Чтение и вывод логов работы устройства в реальном времени.
     
     Параметры:
-      - configuration: имя файла, относительный путь (config/...) или абсолютный путь к YAML
+      - configuration: имя конфигурации устройства на сервере ESPHome API
       - port: "OTA" (по умолчанию) или serial-порт (/dev/ttyUSB0, COM3 и т.д.)
       - duration_seconds: продолжительность сбора логов в секундах (1-60, по умолчанию 10)
       - lines_count: максимальное количество собираемых строк (по умолчанию 50)
     """
-    config_name, file_content = resolve_configuration(configuration)
+    config_name = resolve_configuration(configuration)
     duration_seconds = max(1, min(60, duration_seconds))
     lines_count = max(1, min(500, lines_count))
     
@@ -522,58 +421,43 @@ async def stream_device_logs(configuration: str, port: str = "OTA", duration_sec
             if first_msg.get("requires_auth"):
                 return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
             
-            tmp_config_name: str | None = None
-            if file_content is not None:
+            await ws.send(json.dumps({
+                "command": "devices/logs",
+                "message_id": msg_id,
+                "args": {"configuration": config_name, "port": port}
+            }))
+            
+            start_time = asyncio.get_event_loop().time()
+            while True:
+                elapsed = asyncio.get_event_loop().time() - start_time
+                remaining_time = duration_seconds - elapsed
+                if remaining_time <= 0 or len(output_log) >= lines_count:
+                    break
+                    
                 try:
-                    tmp_config_name = await create_temp_config(ws, file_content)
-                except Exception as e:
-                    return f"Ошибка создания временного конфига: {e}"
-                target_config = tmp_config_name
-            else:
-                target_config = config_name
-                
-            try:
-                await ws.send(json.dumps({
-                    "command": "devices/logs",
-                    "message_id": msg_id,
-                    "args": {"configuration": target_config, "port": port}
-                }))
-                
-                start_time = asyncio.get_event_loop().time()
-                while True:
-                    elapsed = asyncio.get_event_loop().time() - start_time
-                    remaining_time = duration_seconds - elapsed
-                    if remaining_time <= 0 or len(output_log) >= lines_count:
-                        break
-                        
-                    try:
-                        message = await asyncio.wait_for(ws.recv(), timeout=max(0.1, remaining_time))
-                    except asyncio.TimeoutError:
-                        break
-                        
-                    data = json.loads(message)
-                    if data.get("error_code") or data.get("type") == "error":
-                        return f"Ошибка чтения логов: {data.get('details', data)}"
-                        
-                    if data.get("message_id") == msg_id and data.get("event") == "output":
-                        line_data = data.get("data", "")
-                        if isinstance(line_data, dict):
-                            line = line_data.get("line", "").strip()
-                        else:
-                            line = str(line_data).strip()
-                        if line:
-                            output_log.append(clean_ansi(line))
-                            
-                if not output_log:
-                    return f"Логи устройства ({target_config}) не получены за {duration_seconds} сек. (Устройство оффлайн или тишина в порте)."
+                    message = await asyncio.wait_for(ws.recv(), timeout=max(0.1, remaining_time))
+                except asyncio.TimeoutError:
+                    break
                     
-                tail = "\n".join(output_log[-lines_count:])
-                return f"Собрано {len(output_log)} строк лога ({target_config}, {port}):\n\n{tail}"
-                
-            finally:
-                if tmp_config_name is not None:
-                    await delete_config(ws, tmp_config_name)
+                data = json.loads(message)
+                if data.get("error_code") or data.get("type") == "error":
+                    return f"Ошибка чтения логов: {data.get('details', data)}"
                     
+                if data.get("message_id") == msg_id and data.get("event") == "output":
+                    line_data = data.get("data", "")
+                    if isinstance(line_data, dict):
+                        line = line_data.get("line", "").strip()
+                    else:
+                        line = str(line_data).strip()
+                    if line:
+                        output_log.append(clean_ansi(line))
+                        
+            if not output_log:
+                return f"Логи устройства ({config_name}) не получены за {duration_seconds} сек. (Устройство оффлайн или тишина в порте)."
+                
+            tail = "\n".join(output_log[-lines_count:])
+            return f"Собрано {len(output_log)} строк лога ({config_name}, {port}):\n\n{tail}"
+                
     except Exception as e:
         error_msg = f"Ошибка чтения логов ({url}): {str(e)}"
         logger.error(error_msg)
@@ -585,10 +469,10 @@ async def decode_crash_backtrace(configuration: str, lines: list[str], host: str
     Инструмент 7 (P0): Расшифровка C++ дампов паники/стектрейсов устройства (Backtrace decoder).
     
     Параметры:
-      - configuration: имя файла, относительный путь (config/...) или абсолютный путь к YAML
+      - configuration: имя конфигурации устройства на сервере ESPHome API
       - lines: массив строк лога, содержащих дампы паники (например ["Backtrace: 0x400d1234:0x3ffb1234 ..."])
     """
-    config_name, file_content = resolve_configuration(configuration)
+    config_name = resolve_configuration(configuration)
     url = get_ws_url(host, port)
     msg_id = "decode_bt_1"
     
@@ -600,61 +484,46 @@ async def decode_crash_backtrace(configuration: str, lines: list[str], host: str
             if first_msg.get("requires_auth"):
                 return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
                 
-            tmp_config_name: str | None = None
-            if file_content is not None:
-                try:
-                    tmp_config_name = await create_temp_config(ws, file_content)
-                except Exception as e:
-                    return f"Ошибка создания временного конфига: {e}"
-                target_config = tmp_config_name
-            else:
-                target_config = config_name
-                
-            try:
-                await ws.send(json.dumps({
-                    "command": "devices/decode_backtrace",
-                    "message_id": msg_id,
-                    "args": {"configuration": target_config, "lines": lines}
-                }))
-                
-                async for message in ws:
-                    data = json.loads(message)
-                    if data.get("message_id") != msg_id:
-                        continue
-                    if data.get("error_code"):
-                        return f"Ошибка расшифровки стектрейса: {data.get('details', data)}"
-                        
-                    res = data.get("result", {})
-                    decoded_items = res.get("decoded", [])
-                    stale = res.get("stale_build", False)
-                    unavail_reason = res.get("unavailable_reason")
+            await ws.send(json.dumps({
+                "command": "devices/decode_backtrace",
+                "message_id": msg_id,
+                "args": {"configuration": config_name, "lines": lines}
+            }))
+            
+            async for message in ws:
+                data = json.loads(message)
+                if data.get("message_id") != msg_id:
+                    continue
+                if data.get("error_code"):
+                    return f"Ошибка расшифровки стектрейса: {data.get('details', data)}"
                     
-                    output = [f"### Результат расшифровки дампа паники ({target_config}):\n"]
-                    if unavail_reason:
-                        output.append(f"⚠️ **Предупреждение:** Расшифровка частично или полностью недоступна ({unavail_reason}).")
-                        if unavail_reason == "no_build":
-                            output.append("Причина: Бинарник ещё не компилировался локально на этом сервере (отсутствуют symbols/ELF).")
-                        elif unavail_reason == "no_backtrace":
-                            output.append("Причина: В переданных строках не обнаружено адресов стека (0x...).")
-                        output.append("")
-                        
-                    if stale:
-                        output.append("⚠️ **Внимание:** Конфигурация менялась с момента последней сборки (`stale_build=True`), символы могут быть неточными.\n")
-                        
-                    if decoded_items:
-                        output.append("Расшифрованные вызовы:")
-                        for item in decoded_items:
-                            idx = item.get("index", "")
-                            text = item.get("text", "")
-                            output.append(f"  [{idx}] {text}")
-                    else:
-                        output.append("Расшифрованных адресов не найдено.")
-                        
-                    return "\n".join(output)
+                res = data.get("result", {})
+                decoded_items = res.get("decoded", [])
+                stale = res.get("stale_build", False)
+                unavail_reason = res.get("unavailable_reason")
+                
+                output = [f"### Результат расшифровки дампа паники ({config_name}):\n"]
+                if unavail_reason:
+                    output.append(f"⚠️ **Предупреждение:** Расшифровка частично или полностью недоступна ({unavail_reason}).")
+                    if unavail_reason == "no_build":
+                        output.append("Причина: Бинарник ещё не компилировался локально на этом сервере (отсутствуют symbols/ELF).")
+                    elif unavail_reason == "no_backtrace":
+                        output.append("Причина: В переданных строках не обнаружено адресов стека (0x...).")
+                    output.append("")
                     
-            finally:
-                if tmp_config_name is not None:
-                    await delete_config(ws, tmp_config_name)
+                if stale:
+                    output.append("⚠️ **Внимание:** Конфигурация менялась с момента последней сборки (`stale_build=True`), символы могут быть неточными.\n")
+                    
+                if decoded_items:
+                    output.append("Расшифрованные вызовы:")
+                    for item in decoded_items:
+                        idx = item.get("index", "")
+                        text = item.get("text", "")
+                        output.append(f"  [{idx}] {text}")
+                else:
+                    output.append("Расшифрованных адресов не найдено.")
+                    
+                return "\n".join(output)
                     
     except Exception as e:
         error_msg = f"Ошибка расшифровки стектрейса ({url}): {str(e)}"

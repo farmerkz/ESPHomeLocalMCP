@@ -61,13 +61,23 @@
 
 ## 📁 Правила работы с путями (`configuration`)
 
-Все инструменты, принимающие параметр `configuration`, поддерживают три формата путей:
+Все инструменты, принимающие параметр `configuration`, работают исключительно через ESPHome WebSocket API без доступа к локальным файлам хоста:
 
 | Формат | Пример | Поведение |
 |--------|--------|-----------|
-| **Имя файла** | `mcp-test.yaml` | Передаётся напрямую в ESPHome API |
-| **Относительный с префиксом** | `config/mcp-test.yaml` | Префикс `config/` обрезается автоматически |
-| **Абсолютный путь** | `/Users/user/project/mcp-test.yaml` | Файл читается с диска, создаётся временный конфиг в ESPHome через `devices/create`, гарантированно удаляется через `devices/delete` после выполнения (`try/finally`). Реальное имя файла всегда извлекается из `result.configuration`. |
+| **Имя файла/конфигурации** | `mcp-test.yaml` | Передаётся напрямую в ESPHome API |
+| **Относительный с префиксом** | `config/mcp-test.yaml` | Префикс `config/` обрезается автоматически, передаётся `mcp-test.yaml` |
+
+---
+
+## 🧪 Тестирование и манифест конфигураций
+
+В проекте реализован адаптивный тестовый сценарий ([`test/test_mcp_server.py`](file:///Users/andreyzolotnitskiy/Documents/github/ESPHomeLocalMCP/test/test_mcp_server.py)):
+- **Манифест устройств ([`test/test_devices.json`](file:///Users/andreyzolotnitskiy/Documents/github/ESPHomeLocalMCP/test/test_devices.json)):** содержит документированный список целевых устройств (`test.yaml`, `liligo-t-internet.yaml`, `esp32-c6-lora-test-01.yaml`) и флаги разрешённых операций (`allow_compile`, `allow_ota_flash`, `allow_state_mutation`).
+- **Режимы тестирования:**
+  - *Full Pipeline:* при наличии и валидности манифеста запускается полный комплекс тестов (включая компиляцию и OTA-прошивку).
+  - *Safe Mode:* при отсутствии манифеста или ошибках его парсинга автоматически выполняются только безопасные read-only тесты, не меняющие состояние устройств.
+- **Запуск тестов:** `.venv/bin/python3 test/test_mcp_server.py`
 
 ---
 
