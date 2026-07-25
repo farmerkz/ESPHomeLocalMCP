@@ -641,8 +641,6 @@ async def search_yaml_configs(query: str, context_lines: int = 2, case_sensitive
         logger.error(error_msg)
         return error_msg
 
-if __name__ == "__main__":
-    mcp.run(transport='stdio')
 
 # ==========================================
 # ФАЗА P1: УПРАВЛЕНИЕ КОНФИГУРАЦИЯМИ, ПЛАТАМИ И СБОРКАМИ
@@ -1373,3 +1371,7 @@ async def authenticate_esphome(
         error_msg = f"Критическая ошибка authenticate_esphome ({url}): {str(e)}"
         logger.error(error_msg)
         return error_msg
+
+if __name__ == "__main__":
+    mcp.run(transport='stdio')
+
