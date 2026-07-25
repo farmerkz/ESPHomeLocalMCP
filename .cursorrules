@@ -10,14 +10,16 @@
 - **Транспорт:** `stdio` (стандартный ввод-вывод).
 - **Стек:** Python 3.11, библиотека `mcp.server.fastmcp`, `websockets`. Окружение — Python venv (`.venv/`).
 - **Интеграция:** Подключается к ESPHome API по WebSocket (`ws://<host>:6052/ws`). Значение `host` по умолчанию — `localhost`.
-- **Инструменты (Tools):** 
-  - `validate_yaml` (проверка синтаксиса)
-  - `compile_firmware` (сборка без прошивки)
-  - `flash_ota` (прошивка готового бинарника)
-  - `compile_and_flash` (сборка + OTA прошивка)
+- **Инструменты (Tools) — всего 15:**
+  - **Базовые (4):** `validate_yaml`, `compile_firmware`, `flash_ota`, `compile_and_flash`
+  - **Мониторинг и отладка P0 (4):** `list_devices`, `stream_device_logs`, `decode_crash_backtrace`, `search_yaml_configs`
+  - **Управление конфигурациями P1 (3):** `manage_device_config`, `get_board_info`, `manage_build_jobs`
+  - **Пакетные операции P2 (4):** `batch_compile_and_flash`, `archive_devices`, `manage_device_labels`, `authenticate_esphome`
 - **Процесс сборки:** Двухшаговый. Сначала отправляется команда, из ответа извлекается `job_id`, затем открывается поток логов через команду `firmware/follow_job`.
+- **Нормализация путей:** Все инструменты, принимающие `configuration`, поддерживают три формата: имя файла, `config/file.yaml`, абсолютный путь. При абсолютном пути: создаётся временный конфиг через `devices/create`, после выполнения гарантированно удаляется через `devices/delete` (`try/finally`). Реальное имя созданного файла всегда берётся из ответа API (`result.configuration`).
 
 ---
+
 
 ## 2. Критические правила и предотвращение ошибок
 

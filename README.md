@@ -1,8 +1,8 @@
 # ESPHome Local MCP Server
 
-Локальный сервер протокола MCP (Model Context Protocol) для интеграции **ESPHome Device Builder** с AI-ассистентами (Cursor, VS Code Copilot, Claude Desktop, Antigravity). 
+Локальный сервер протокола MCP (Model Context Protocol) для интеграции **ESPHome Device Builder** с AI-ассистентами (Cursor, VS Code Copilot, Claude Desktop, Antigravity).
 
-Позволяет языковым моделям (LLM) автономно валидировать, компилировать и прошивать (OTA) конфигурации ESPHome напрямую в локальной среде разработчика.
+Позволяет языковым моделям (LLM) автономно управлять всем жизненным циклом устройств ESPHome: валидировать конфигурации, компилировать и прошивать (OTA) прошивки, читать runtime-логи, расшифровывать дампы паники, производить поиск по всем конфигурациям, управлять платами, задачами сборки, архивом устройств и правами доступа — напрямую через WebSocket API ESPHome Device Builder.
 
 ## 🌟 Возможности
 
@@ -13,36 +13,69 @@
   - `mcp-test.yaml` — имя файла в конфиг-директории ESPHome
   - `config/mcp-test.yaml` — автоматически обрезает префикс `config/`
   - `/абсолютный/путь/к/mcp-test.yaml` — читает файл с диска, временно создаёт конфиг в ESPHome через `devices/create` и гарантированно удаляет его после выполнения команды (`try/finally`)
-- **Гарантированная OTA-прошивка:** Инструменты установки явно используют параметр `port: "OTA"` для прошивки "по воздуху".
-- **Проверка авторизации:** Сервер корректно определяет флаг `requires_auth` и предупредит агента, если ESPHome защищен паролем.
+- **Гарантированная OTA-прошивка:** Инструменты установки явно используют параметр `port: "OTA"` для прошивки «по воздуху».
+- **Проверка авторизации:** Сервер корректно определяет флаг `requires_auth` и предупредит агента, если ESPHome защищён паролем.
 
 ## 🛠 Доступные MCP Инструменты
 
-Сервер предоставляет 4 инструмента (tools) для AI-агентов:
+Сервер предоставляет **15 инструментов** для AI-агентов, разбитых на 4 группы.
 
-1. **`validate_yaml(configuration, host)`**
-   Быстрая проверка синтаксиса и структуры YAML файла без компиляции C++ кода. Использует API `devices/validate`.
-   
-2. **`compile_firmware(configuration, host)`**
-   Полный цикл генерации C++ кода и компиляции прошивки. Без прошивки устройства. Использует API `firmware/compile`.
-   
-3. **`flash_ota(configuration, host)`**
-   Прошивка уже скомпилированного бинарника (OTA). Использует API `firmware/upload`.
-   
-4. **`compile_and_flash(configuration, host)`**
-   Полный цикл: генерация C++, сборка и последующая заливка по воздуху (OTA). Использует API `firmware/install`.
+---
 
-*Параметр `host` по умолчанию равен `localhost`, что соответствует адресу локального ESPHome Device Builder.*
+### Группа 1: Базовые операции (Compile & Flash)
+
+| # | Инструмент | API-команда | Описание |
+|---|-----------|-------------|----------|
+| 1 | `validate_yaml(configuration, host)` | `devices/validate` | Быстрая проверка синтаксиса и структуры YAML без компиляции C++ кода |
+| 2 | `compile_firmware(configuration, host)` | `firmware/compile` | Полная компиляция прошивки без прошивки устройства |
+| 3 | `flash_ota(configuration, host)` | `firmware/upload` | Прошивка уже скомпилированного бинарника по воздуху (OTA) |
+| 4 | `compile_and_flash(configuration, host)` | `firmware/install` | Полный цикл: компиляция и OTA-прошивка одной командой |
+
+---
+
+### Группа 2: Мониторинг и Отладка (P0)
+
+| # | Инструмент | API-команда | Описание |
+|---|-----------|-------------|----------|
+| 5 | `list_devices(host)` | `devices/list` | Список всех устройств с IP-адресами, статусами (online/offline), версиями прошивки и флагами незакомпилированных изменений |
+| 6 | `stream_device_logs(configuration, port, duration_seconds, lines_count, host)` | `devices/logs` | Чтение runtime-логов работы устройства по OTA или Serial в реальном времени |
+| 7 | `decode_crash_backtrace(configuration, lines, host)` | `devices/decode_backtrace` | Расшифровка C++ стектрейсов/дампов паники устройства с помощью `addr2line` и ELF-символов сборки |
+| 8 | `search_yaml_configs(query, context_lines, case_sensitive, host)` | `yaml/search` | Полнотекстовый поиск подстроки по всем YAML-конфигурациям ESPHome с выводом контекстных строк |
+
+---
+
+### Группа 3: Управление Конфигурациями, Платами и Сборками (P1)
+
+| # | Инструмент | API-команды | Описание |
+|---|-----------|-------------|----------|
+| 9 | `manage_device_config(action, configuration, content, new_name, host)` | `devices/get_config`, `devices/update_config`, `devices/create`, `devices/rename`, `devices/delete` | CRUD для YAML-конфигураций: чтение, запись, создание, переименование и удаление через API |
+| 10 | `get_board_info(action, board_id, platform, query, limit, host)` | `boards/get_boards`, `boards/get_board`, `boards/get_compatible_boards` | Каталог плат ESPHome: поиск, полная информация (распиновка, features, docs), список взаимозаменяемых плат |
+| 11 | `manage_build_jobs(action, configuration, job_id, status_filter, host)` | `firmware/get_jobs`, `firmware/get_job`, `firmware/cancel`, `firmware/clean`, `firmware/reset_build_env` | Управление очередью сборки: просмотр задач, отмена, очистка кэша сборки устройства, глобальный сброс `.esphome/` |
+
+---
+
+### Группа 4: Пакетные Операции, Архивация и Безопасность (P2)
+
+| # | Инструмент | API-команды | Описание |
+|---|-----------|-------------|----------|
+| 12 | `batch_compile_and_flash(configurations, action, port, host)` | `firmware/compile_bulk`, `firmware/install_bulk` | Пакетная компиляция и/или OTA-прошивка группы устройств; поддерживает отложенные обновления (deferred install) для оффлайн-устройств |
+| 13 | `archive_devices(action, configuration, host)` | `devices/archive`, `devices/unarchive`, `devices/list_archived`, `devices/delete_archived` | Мягкое удаление устройств в архив (обратимо), восстановление и просмотр архива |
+| 14 | `manage_device_labels(configuration, label_ids, host)` | `devices/set_labels` | Установка/удаление меток (тегов) устройств для организации парка |
+| 15 | `authenticate_esphome(username, password, token, host)` | `auth/login` | Аутентификация на ESPHome-серверах, защищённых паролем (`requires_auth=true`) |
+
+---
 
 ### Форматы параметра `configuration`
 
-Все инструменты принимают три формата:
+Инструменты из групп 1–3, принимающие `configuration`, поддерживают три формата:
 
 | Формат | Пример | Поведение |
 |--------|--------|-----------|
 | Имя файла | `mcp-test.yaml` | Передаётся напрямую в ESPHome API |
 | Относительный с префиксом | `config/mcp-test.yaml` | Префикс `config/` обрезается автоматически |
-| **Абсолютный путь** | `/Users/user/project/mcp-test.yaml` | Файл читается с диска, временно создаётся в ESPHome и удаляется после выполнения |
+| **Абсолютный путь** | `/Users/user/project/mcp-test.yaml` | Файл читается с диска, временно создаётся в ESPHome и гарантированно удаляется после выполнения (`try/finally`) |
+
+---
 
 ## 🚀 Установка и Запуск
 
@@ -93,12 +126,15 @@ bash setup.sh
 }
 ```
 
+---
+
 ## 🏗 Архитектура
 
 - **Транспорт:** `stdio` (стандартный ввод-вывод) — стандарт для локальных MCP-серверов.
 - **Фреймворк:** `mcp.server.fastmcp.FastMCP` (официальный Python SDK).
 - **Окружение:** Python venv (`.venv/`), зависимости: `mcp`, `websockets`.
-- **Связь с ESPHome:** Библиотека `websockets`. Запросы отправляются в виде JSON-RPC сообщений, совместимых с новым протоколом ESPHome Device Builder API (обертка параметров в `args`, ожидание потока `output` и события `result`).
+- **Связь с ESPHome:** Библиотека `websockets`. Запросы отправляются в виде JSON-совместимых сообщений протокола ESPHome Device Builder API (обёртка параметров в `args`, ожидание потока событий `output` и завершающего события `result`).
+- **Трёхрежимная работа с путями:** Для абсолютных путей используется временный конфиг через `devices/create`/`devices/delete`, реальное имя берётся из ответа API (ESPHome может slugify имя).
 
 ## 📝 Логирование и отладка
 
