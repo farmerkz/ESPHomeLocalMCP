@@ -8,10 +8,98 @@ import re
 import os
 import uuid
 
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib  # type: ignore
+    except ImportError:
+        tomllib = None  # type: ignore
+
 # 1. ЗАЩИТА ПРОТОКОЛА: Перенаправляем все логи в stderr.
 # Обычный print() использовать категорически запрещено!
 logging.basicConfig(stream=sys.stderr, level=logging.INFO)
 logger = logging.getLogger("esphome-mcp")
+
+FALLBACK_HOST = "localhost"
+FALLBACK_PORT = 6052
+
+def load_env_config() -> tuple[str, int]:
+    """
+    Загружает IP/хост и порт из файла .env в формате TOML.
+    Возвращает кортеж (host, port).
+    При отсутствии .env или при ошибке парсинга .env используются
+    'localhost' и порт по умолчанию 6052.
+    """
+    env_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+        ".env"
+    ]
+    env_file = None
+    for path in env_paths:
+        if os.path.isfile(path):
+            env_file = path
+            break
+
+    if not env_file:
+        logger.info(f"Файл .env не найден, используются настройки по умолчанию ({FALLBACK_HOST}:{FALLBACK_PORT})")
+        return FALLBACK_HOST, FALLBACK_PORT
+
+    if tomllib is None:
+        logger.warning(f"Модуль tomllib/tomli недоступен. Используются настройки по умолчанию ({FALLBACK_HOST}:{FALLBACK_PORT})")
+        return FALLBACK_HOST, FALLBACK_PORT
+
+    try:
+        with open(env_file, "rb") as f:
+            data = tomllib.load(f)
+
+        if not isinstance(data, dict):
+            raise ValueError("Содержимое TOML файла должно содержать ключевые пары")
+
+        # Извлекаем хост и порт из корня TOML или секции [api] / [esphome]
+        host = (
+            data.get("host")
+            or data.get("ip")
+            or data.get("api", {}).get("host")
+            or data.get("api", {}).get("ip")
+            or data.get("esphome", {}).get("host")
+            or data.get("esphome", {}).get("ip")
+            or FALLBACK_HOST
+        )
+
+        port_val = (
+            data.get("port")
+            or data.get("api", {}).get("port")
+            or data.get("esphome", {}).get("port")
+            or FALLBACK_PORT
+        )
+
+        try:
+            port = int(port_val)
+        except (ValueError, TypeError):
+            logger.warning(f"Некорректное значение порта в .env ({port_val!r}), используется {FALLBACK_PORT}")
+            port = FALLBACK_PORT
+
+        host_str = str(host).strip()
+        if not host_str:
+            host_str = FALLBACK_HOST
+
+        logger.info(f"Загружены настройки из .env: host={host_str!r}, port={port}")
+        return host_str, port
+
+    except Exception as e:
+        logger.warning(f"Ошибка чтения/парсинга .env: {e}. Используются настройки по умолчанию ({FALLBACK_HOST}:{FALLBACK_PORT})")
+        return FALLBACK_HOST, FALLBACK_PORT
+
+DEFAULT_HOST, DEFAULT_PORT = load_env_config()
+
+def get_ws_url(host: str | None = None, port: int | None = None) -> str:
+    """
+    Формирует URL подключения к ESPHome WebSocket API.
+    """
+    h = host if host else DEFAULT_HOST
+    p = port if port is not None else DEFAULT_PORT
+    return f"ws://{h}:{p}/ws"
 
 # Инициализация MCP сервера
 mcp = FastMCP("esphome-device-builder")
@@ -115,7 +203,8 @@ async def delete_config(ws, config_name: str) -> None:
 
 
 async def execute_ws_command(host: str, command_type: str, args: dict,
-                             file_content: str | None = None) -> str:
+                             file_content: str | None = None,
+                             port: int | None = None) -> str:
     """
     Выполняет команду ESPHome WebSocket API.
     
@@ -123,7 +212,7 @@ async def execute_ws_command(host: str, command_type: str, args: dict,
     в ESPHome через devices/create, после выполнения он удаляется (через devices/delete),
     даже при ошибке (try/finally).
     """
-    url = f"ws://{host}:6052/ws"
+    url = get_ws_url(host, port)
     output_log = []
     request_id = "1"
     
@@ -264,7 +353,7 @@ async def execute_ws_command(host: str, command_type: str, args: dict,
 # ==========================================
 
 @mcp.tool()
-async def validate_yaml(configuration: str, host: str = "localhost") -> str:
+async def validate_yaml(configuration: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
     """
     Инструмент 1: Только валидация YAML конфигурации.
     
@@ -275,10 +364,10 @@ async def validate_yaml(configuration: str, host: str = "localhost") -> str:
     """
     config_name, file_content = resolve_configuration(configuration)
     return await execute_ws_command(host, "devices/validate",
-                                    {"configuration": config_name}, file_content)
+                                    {"configuration": config_name}, file_content, port=port)
 
 @mcp.tool()
-async def compile_firmware(configuration: str, host: str = "localhost") -> str:
+async def compile_firmware(configuration: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
     """
     Инструмент 2: Только компиляция прошивки без загрузки.
     
@@ -289,10 +378,10 @@ async def compile_firmware(configuration: str, host: str = "localhost") -> str:
     """
     config_name, file_content = resolve_configuration(configuration)
     return await execute_ws_command(host, "firmware/compile",
-                                    {"configuration": config_name}, file_content)
+                                    {"configuration": config_name}, file_content, port=port)
 
 @mcp.tool()
-async def flash_ota(configuration: str, host: str = "localhost") -> str:
+async def flash_ota(configuration: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
     """
     Инструмент 3: Только OTA-прошивка готового бинарника.
     
@@ -303,10 +392,10 @@ async def flash_ota(configuration: str, host: str = "localhost") -> str:
     """
     config_name, file_content = resolve_configuration(configuration)
     return await execute_ws_command(host, "firmware/upload",
-                                    {"configuration": config_name, "port": "OTA"}, file_content)
+                                    {"configuration": config_name, "port": "OTA"}, file_content, port=port)
 
 @mcp.tool()
-async def compile_and_flash(configuration: str, host: str = "localhost") -> str:
+async def compile_and_flash(configuration: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
     """
     Инструмент 4: Полный цикл (Компиляция + OTA-Прошивка).
     
@@ -317,21 +406,21 @@ async def compile_and_flash(configuration: str, host: str = "localhost") -> str:
     """
     config_name, file_content = resolve_configuration(configuration)
     return await execute_ws_command(host, "firmware/install",
-                                    {"configuration": config_name, "port": "OTA"}, file_content)
+                                    {"configuration": config_name, "port": "OTA"}, file_content, port=port)
 
 # ==========================================
 # ФАЗА P0: ИНСТРУМЕНТЫ МОНИТОРИНГА И ОТЛАДКИ
 # ==========================================
 
 @mcp.tool()
-async def list_devices(host: str = "localhost") -> str:
+async def list_devices(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
     """
     Инструмент 5 (P0): Получение полного списка всех устройств ESPHome и их статусов.
     
     Возвращает список устройств с их именем, файлом конфигурации, статусом (online/offline),
     IP-адресом, версией ESPHome, флагом незакомпилированных изменений (has_pending_changes) и метками.
     """
-    url = f"ws://{host}:6052/ws"
+    url = get_ws_url(host, port)
     msg_id = "list_devices_1"
     
     logger.info(f"Запрос списка устройств с {url}...")
@@ -406,7 +495,7 @@ async def list_devices(host: str = "localhost") -> str:
 
 @mcp.tool()
 async def stream_device_logs(configuration: str, port: str = "OTA", duration_seconds: int = 10,
-                               lines_count: int = 50, host: str = "localhost") -> str:
+                               lines_count: int = 50, host: str = DEFAULT_HOST, api_port: int = DEFAULT_PORT) -> str:
     """
     Инструмент 6 (P0): Чтение и вывод логов работы устройства в реальном времени.
     
@@ -420,7 +509,7 @@ async def stream_device_logs(configuration: str, port: str = "OTA", duration_sec
     duration_seconds = max(1, min(60, duration_seconds))
     lines_count = max(1, min(500, lines_count))
     
-    url = f"ws://{host}:6052/ws"
+    url = get_ws_url(host, api_port)
     msg_id = "logs_stream_1"
     output_log = []
     
@@ -491,7 +580,7 @@ async def stream_device_logs(configuration: str, port: str = "OTA", duration_sec
         return error_msg
 
 @mcp.tool()
-async def decode_crash_backtrace(configuration: str, lines: list[str], host: str = "localhost") -> str:
+async def decode_crash_backtrace(configuration: str, lines: list[str], host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
     """
     Инструмент 7 (P0): Расшифровка C++ дампов паники/стектрейсов устройства (Backtrace decoder).
     
@@ -500,7 +589,7 @@ async def decode_crash_backtrace(configuration: str, lines: list[str], host: str
       - lines: массив строк лога, содержащих дампы паники (например ["Backtrace: 0x400d1234:0x3ffb1234 ..."])
     """
     config_name, file_content = resolve_configuration(configuration)
-    url = f"ws://{host}:6052/ws"
+    url = get_ws_url(host, port)
     msg_id = "decode_bt_1"
     
     logger.info(f"Отправка дампа стека {config_name} для расшифровки...")
@@ -573,7 +662,7 @@ async def decode_crash_backtrace(configuration: str, lines: list[str], host: str
         return error_msg
 
 @mcp.tool()
-async def search_yaml_configs(query: str, context_lines: int = 2, case_sensitive: bool = False, host: str = "localhost") -> str:
+async def search_yaml_configs(query: str, context_lines: int = 2, case_sensitive: bool = False, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
     """
     Инструмент 8 (P0): Поиск подстроки по всем YAML-конфигурациям ESPHome.
     
@@ -582,7 +671,7 @@ async def search_yaml_configs(query: str, context_lines: int = 2, case_sensitive
       - context_lines: количество контекстных строк до и после совпадения (0-10, по умолчанию 2)
       - case_sensitive: учитывать ли регистр символов (по умолчанию False)
     """
-    url = f"ws://{host}:6052/ws"
+    url = get_ws_url(host, port)
     msg_id = "yaml_search_1"
     
     logger.info(f"Поиск подстроки {query!r} в YAML-конфигурациях ESPHome...")
@@ -658,7 +747,8 @@ async def manage_device_config(
     content: str = "",
     new_name: str = "",
     allow_wipe: bool = False,
-    host: str = "localhost"
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
 ) -> str:
     """
     Инструмент 9 (P1): Управление конфигурацией устройств ESPHome через API.
@@ -672,7 +762,7 @@ async def manage_device_config(
 
     Параметр configuration — имя файла, например "test.yaml".
     """
-    url = f"ws://{host}:6052/ws"
+    url = get_ws_url(host, port)
     msg_id = "manage_cfg_1"
 
     command_map = {
@@ -764,7 +854,8 @@ async def get_board_info(
     platform: str = "",
     query: str = "",
     limit: int = 20,
-    host: str = "localhost"
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
 ) -> str:
     """
     Инструмент 10 (P1): Получение информации о платах из каталога ESPHome.
@@ -780,7 +871,7 @@ async def get_board_info(
       - query:     строка поиска (название платы, MCU, производитель)
       - limit:     максимальное количество результатов (по умолчанию 20)
     """
-    url = f"ws://{host}:6052/ws"
+    url = get_ws_url(host, port)
     msg_id = "board_info_1"
     action = action.strip().lower()
 
@@ -915,7 +1006,8 @@ async def manage_build_jobs(
     configuration: str = "",
     job_id: str = "",
     status_filter: str = "",
-    host: str = "localhost"
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
 ) -> str:
     """
     Инструмент 11 (P1): Управление очередью компиляции и сборки устройств ESPHome.
@@ -932,7 +1024,7 @@ async def manage_build_jobs(
       - job_id:         идентификатор задачи (для get, cancel)
       - status_filter:  фильтр по статусу: "queued", "running", "completed", "failed", "cancelled"
     """
-    url = f"ws://{host}:6052/ws"
+    url = get_ws_url(host, port)
     msg_id = "build_jobs_1"
     action = action.strip().lower()
 
@@ -1086,7 +1178,8 @@ async def batch_compile_and_flash(
     configurations: list[str],
     action: str = "install",
     port: str = "OTA",
-    host: str = "localhost"
+    host: str = DEFAULT_HOST,
+    api_port: int = DEFAULT_PORT
 ) -> str:
     """
     Инструмент 12 (P2): Пакетная компиляция и/или прошивка нескольких устройств ESPHome.
@@ -1111,7 +1204,7 @@ async def batch_compile_and_flash(
     if action == "install":
         args["port"] = port
 
-    url = f"ws://{host}:6052/ws"
+    url = get_ws_url(host, api_port)
     msg_id = "batch_flash_1"
 
     logger.info(f"batch_compile_and_flash: action={action!r}, {len(configurations)} устройств...")
@@ -1165,7 +1258,8 @@ async def batch_compile_and_flash(
 async def archive_devices(
     action: str,
     configuration: str = "",
-    host: str = "localhost"
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
 ) -> str:
     """
     Инструмент 13 (P2): Архивация и восстановление устройств ESPHome.
@@ -1196,7 +1290,7 @@ async def archive_devices(
     command = command_map[action]
     args = {"configuration": configuration} if action != "list" else {}
 
-    url = f"ws://{host}:6052/ws"
+    url = get_ws_url(host, port)
     msg_id = "archive_dev_1"
 
     logger.info(f"archive_devices: action={action!r}, configuration={configuration!r}")
@@ -1253,7 +1347,8 @@ async def archive_devices(
 async def manage_device_labels(
     configuration: str,
     label_ids: list[str],
-    host: str = "localhost"
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
 ) -> str:
     """
     Инструмент 14 (P2): Управление метками (тегами) устройств ESPHome.
@@ -1265,7 +1360,7 @@ async def manage_device_labels(
       - configuration: имя YAML-файла устройства (например "test.yaml")
       - label_ids:     список идентификаторов меток для установки (например ["room:living_room"])
     """
-    url = f"ws://{host}:6052/ws"
+    url = get_ws_url(host, port)
     msg_id = "set_labels_1"
 
     logger.info(f"manage_device_labels: configuration={configuration!r}, labels={label_ids}")
@@ -1308,7 +1403,8 @@ async def authenticate_esphome(
     username: str = "",
     password: str = "",
     token: str = "",
-    host: str = "localhost"
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
 ) -> str:
     """
     Инструмент 15 (P2): Аутентификация на защищённом ESPHome-сервере (requires_auth=true).
@@ -1325,7 +1421,8 @@ async def authenticate_esphome(
     if not token and not (username and password):
         return "Ошибка: необходимо указать либо (username + password), либо token."
 
-    url = f"ws://{host}:6052/ws"
+    url = get_ws_url(host, port)
+    p = port if port is not None else DEFAULT_PORT
     msg_id = "auth_login_1"
 
     args: dict = {}
@@ -1341,7 +1438,7 @@ async def authenticate_esphome(
             first_msg = json.loads(first_msg_raw)
 
             if not first_msg.get("requires_auth"):
-                return f"ℹ️ ESPHome на {host}:6052 не требует аутентификации (requires_auth=false). Вход не нужен."
+                return f"ℹ️ ESPHome на {host}:{p} не требует аутентификации (requires_auth=false). Вход не нужен."
 
             await ws.send(json.dumps({
                 "command": "auth/login",
@@ -1366,7 +1463,7 @@ async def authenticate_esphome(
                 expires_at = result.get("expires_at", "")
 
                 return (
-                    f"✅ Аутентификация успешна на {host}:6052\n"
+                    f"✅ Аутентификация успешна на {host}:{p}\n"
                     f"- **Токен:** `{new_token}`\n"
                     f"- **Действителен до:** {expires_at}\n\n"
                     f"💡 Сохраните токен для повторного входа без пароля (параметр token)."

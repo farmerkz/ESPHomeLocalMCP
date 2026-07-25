@@ -4,8 +4,11 @@
 # Не игнорировать .git и .gitignore
 !.git
 !.gitignore
-!.cursorrules
 !.agents
+!.env.example
+
+# Локальные конфигурации
+.env
 
 # Виртуальное окружение Python
 .venv/
