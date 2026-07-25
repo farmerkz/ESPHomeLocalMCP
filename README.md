@@ -6,7 +6,10 @@
 
 ## 🌟 Возможности
 
+## 🌟 Возможности
+
 - **Интеграция через WebSockets:** Напрямую общается с локальным ESPHome Device Builder API (по умолчанию `ws://localhost:6052/ws`).
+- **Гибкая конфигурация (.env):** Поддерживает чтение IP-адреса (`host`) и порта (`port`) сервера API из файла `.env` в формате TOML с автоматическим возвратом к `localhost:6052` при отсутствии файла или ошибках парсинга.
 - **Умная обработка логов:** Очищает вывод ESPHome от ANSI-цветовых кодов для обеспечения чистого и читаемого ответа для LLM.
 - **Двухшаговый трекинг задач:** Корректно подписывается на задачи компиляции и прошивки (`firmware/follow_job`) и дожидается их завершения (событие `result`).
 - **Нормализация путей:** Поддерживает три формата параметра `configuration`:
@@ -18,7 +21,7 @@
 
 ## 🛠 Доступные MCP Инструменты
 
-Сервер предоставляет **15 инструментов** для AI-агентов, разбитых на 4 группы.
+Сервер предоставляет **15 инструментов** для AI-агентов, разбитых на 4 группы. Каждая команда поддерживает опциональное переопределение `host` и `port` (`api_port`).
 
 ---
 
@@ -26,10 +29,10 @@
 
 | # | Инструмент | API-команда | Описание |
 |---|-----------|-------------|----------|
-| 1 | `validate_yaml(configuration, host)` | `devices/validate` | Быстрая проверка синтаксиса и структуры YAML без компиляции C++ кода |
-| 2 | `compile_firmware(configuration, host)` | `firmware/compile` | Полная компиляция прошивки без прошивки устройства |
-| 3 | `flash_ota(configuration, host)` | `firmware/upload` | Прошивка уже скомпилированного бинарника по воздуху (OTA) |
-| 4 | `compile_and_flash(configuration, host)` | `firmware/install` | Полный цикл: компиляция и OTA-прошивка одной командой |
+| 1 | `validate_yaml(configuration, host, port)` | `devices/validate` | Быстрая проверка синтаксиса и структуры YAML без компиляции C++ кода |
+| 2 | `compile_firmware(configuration, host, port)` | `firmware/compile` | Полная компиляция прошивки без прошивки устройства |
+| 3 | `flash_ota(configuration, host, port)` | `firmware/upload` | Прошивка уже скомпилированного бинарника по воздуху (OTA) |
+| 4 | `compile_and_flash(configuration, host, port)` | `firmware/install` | Полный цикл: компиляция и OTA-прошивка одной командой |
 
 ---
 
@@ -37,10 +40,10 @@
 
 | # | Инструмент | API-команда | Описание |
 |---|-----------|-------------|----------|
-| 5 | `list_devices(host)` | `devices/list` | Список всех устройств с IP-адресами, статусами (online/offline), версиями прошивки и флагами незакомпилированных изменений |
-| 6 | `stream_device_logs(configuration, port, duration_seconds, lines_count, host)` | `devices/logs` | Чтение runtime-логов работы устройства по OTA или Serial в реальном времени |
-| 7 | `decode_crash_backtrace(configuration, lines, host)` | `devices/decode_backtrace` | Расшифровка C++ стектрейсов/дампов паники устройства с помощью `addr2line` и ELF-символов сборки |
-| 8 | `search_yaml_configs(query, context_lines, case_sensitive, host)` | `yaml/search` | Полнотекстовый поиск подстроки по всем YAML-конфигурациям ESPHome с выводом контекстных строк |
+| 5 | `list_devices(host, port)` | `devices/list` | Список всех устройств с IP-адресами, статусами (online/offline), версиями прошивки и флагами незакомпилированных изменений |
+| 6 | `stream_device_logs(configuration, port, duration_seconds, lines_count, host, api_port)` | `devices/logs` | Чтение runtime-логов работы устройства по OTA или Serial в реальном времени |
+| 7 | `decode_crash_backtrace(configuration, lines, host, port)` | `devices/decode_backtrace` | Расшифровка C++ стектрейсов/дампов паники устройства с помощью `addr2line` и ELF-символов сборки |
+| 8 | `search_yaml_configs(query, context_lines, case_sensitive, host, port)` | `yaml/search` | Полнотекстовый поиск подстроки по всем YAML-конфигурациям ESPHome с выводом контекстных строк |
 
 ---
 
@@ -48,9 +51,9 @@
 
 | # | Инструмент | API-команды | Описание |
 |---|-----------|-------------|----------|
-| 9 | `manage_device_config(action, configuration, content, new_name, host)` | `devices/get_config`, `devices/update_config`, `devices/create`, `devices/rename`, `devices/delete` | CRUD для YAML-конфигураций: чтение, запись, создание, переименование и удаление через API |
-| 10 | `get_board_info(action, board_id, platform, query, limit, host)` | `boards/get_boards`, `boards/get_board`, `boards/get_compatible_boards` | Каталог плат ESPHome: поиск, полная информация (распиновка, features, docs), список взаимозаменяемых плат |
-| 11 | `manage_build_jobs(action, configuration, job_id, status_filter, host)` | `firmware/get_jobs`, `firmware/get_job`, `firmware/cancel`, `firmware/clean`, `firmware/reset_build_env` | Управление очередью сборки: просмотр задач, отмена, очистка кэша сборки устройства, глобальный сброс `.esphome/` |
+| 9 | `manage_device_config(action, configuration, content, new_name, allow_wipe, host, port)` | `devices/get_config`, `devices/update_config`, `devices/create`, `devices/rename`, `devices/delete` | CRUD для YAML-конфигураций: чтение, запись, создание, переименование и удаление через API |
+| 10 | `get_board_info(action, board_id, platform, query, limit, host, port)` | `boards/get_boards`, `boards/get_board`, `boards/get_compatible_boards` | Каталог плат ESPHome: поиск, полная информация (распиновка, features, docs), список взаимозаменяемых плат |
+| 11 | `manage_build_jobs(action, configuration, job_id, status_filter, host, port)` | `firmware/get_jobs`, `firmware/get_job`, `firmware/cancel`, `firmware/clean`, `firmware/reset_build_env` | Управление очередью сборки: просмотр задач, отмена, очистка кэша сборки устройства, глобальный сброс `.esphome/` |
 
 ---
 
@@ -58,10 +61,10 @@
 
 | # | Инструмент | API-команды | Описание |
 |---|-----------|-------------|----------|
-| 12 | `batch_compile_and_flash(configurations, action, port, host)` | `firmware/compile_bulk`, `firmware/install_bulk` | Пакетная компиляция и/или OTA-прошивка группы устройств; поддерживает отложенные обновления (deferred install) для оффлайн-устройств |
-| 13 | `archive_devices(action, configuration, host)` | `devices/archive`, `devices/unarchive`, `devices/list_archived`, `devices/delete_archived` | Мягкое удаление устройств в архив (обратимо), восстановление и просмотр архива |
-| 14 | `manage_device_labels(configuration, label_ids, host)` | `devices/set_labels` | Установка/удаление меток (тегов) устройств для организации парка |
-| 15 | `authenticate_esphome(username, password, token, host)` | `auth/login` | Аутентификация на ESPHome-серверах, защищённых паролем (`requires_auth=true`) |
+| 12 | `batch_compile_and_flash(configurations, action, port, host, api_port)` | `firmware/compile_bulk`, `firmware/install_bulk` | Пакетная компиляция и/или OTA-прошивка группы устройств; поддерживает отложенные обновления (deferred install) для оффлайн-устройств |
+| 13 | `archive_devices(action, configuration, host, port)` | `devices/archive`, `devices/unarchive`, `devices/list_archived`, `devices/delete_archived` | Мягкое удаление устройств в архив (обратимо), восстановление и просмотр архива |
+| 14 | `manage_device_labels(configuration, label_ids, host, port)` | `devices/set_labels` | Установка/удаление меток (тегов) устройств для организации парка |
+| 15 | `authenticate_esphome(username, password, token, host, port)` | `auth/login` | Аутентификация на ESPHome-серверах, защищённых паролем (`requires_auth=true`) |
 
 ---
 
@@ -77,7 +80,7 @@
 
 ---
 
-## 🚀 Установка и Запуск
+## 🚀 Установка и Настройка
 
 Сервер запускается напрямую из Python-виртуального окружения (venv) — без Docker.
 
@@ -90,7 +93,26 @@ bash setup.sh
 
 Скрипт создаст папку `.venv/` и установит зависимости (`mcp`, `websockets`).
 
-### 2. Подключение в Cursor / VS Code (Cline / Copilot) / Claude Desktop
+### 2. Конфигурация (.env)
+
+Сервер позволяет задавать параметры подключения к ESPHome в файле `.env` в формате TOML.
+
+Создайте файл `.env` на основе шаблона `.env.example`:
+
+```bash
+cp .env.example .env
+```
+
+Содержимое `.env`:
+```toml
+# Настройки подключения к ESPHome Device Builder API (формат TOML)
+host = "192.168.1.50"
+port = 6052
+```
+
+> **Примечание:** Если файл `.env` отсутствует или содержит синтаксические ошибки, сервер автоматически перейдет на `localhost` и порт `6052`.
+
+### 3. Подключение в Cursor / VS Code (Cline / Copilot) / Claude Desktop
 
 Добавьте следующую конфигурацию в настройки MCP-серверов вашего редактора:
 
@@ -110,7 +132,7 @@ bash setup.sh
 
 > **Важно:** Укажите абсолютный путь до проекта. Флаг `-u` (unbuffered output для Python) обязателен для корректной работы stdio транспорта протокола MCP.
 
-### 3. Подключение в Antigravity (mcp_config.json)
+### 4. Подключение в Antigravity (mcp_config.json)
 
 ```json
 {
@@ -133,6 +155,7 @@ bash setup.sh
 - **Транспорт:** `stdio` (стандартный ввод-вывод) — стандарт для локальных MCP-серверов.
 - **Фреймворк:** `mcp.server.fastmcp.FastMCP` (официальный Python SDK).
 - **Окружение:** Python venv (`.venv/`), зависимости: `mcp`, `websockets`.
+- **Конфигурация:** Библиотека `tomllib` (стандартная в Python 3.11+) для считывания параметров IP и порта из `.env` файла.
 - **Связь с ESPHome:** Библиотека `websockets`. Запросы отправляются в виде JSON-совместимых сообщений протокола ESPHome Device Builder API (обёртка параметров в `args`, ожидание потока событий `output` и завершающего события `result`).
 - **Трёхрежимная работа с путями:** Для абсолютных путей используется временный конфиг через `devices/create`/`devices/delete`, реальное имя берётся из ответа API (ESPHome может slugify имя).
 
@@ -150,5 +173,6 @@ bash setup.sh
 Зависимости перечислены в `requirements.txt`:
 - `mcp` — официальный Python SDK для Model Context Protocol
 - `websockets` — асинхронная работа с WebSocket-соединениями
+- `tomllib` / `tomli` — модуль для парсинга TOML конфигураций из `.env`
 
 > **Примечание:** Файлы `Dockerfile` и `docker-compose.yaml` сохранены в репозитории с пометкой `[DEPRECATED]` для исторической справки. Они больше не используются.
