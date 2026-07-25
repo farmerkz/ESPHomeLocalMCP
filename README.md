@@ -1,10 +1,8 @@
 # ESPHome Local MCP Server
 
-Локальный сервер протокола MCP (Model Context Protocol) для интеграции **ESPHome Device Builder** с AI-ассистентами (Cursor, VS Code Copilot, Claude Desktop, Antigravity).
+Локальный сервер протокола MCP (Model Context Protocol) для интеграции **ESPHome Device Builder** с AI-ассистентами (Cursor, VS Code Copilot, Claude Desktop, Gemini CLI, Antigravity).
 
 Позволяет языковым моделям (LLM) автономно управлять всем жизненным циклом устройств ESPHome: валидировать конфигурации, компилировать и прошивать (OTA) прошивки, читать runtime-логи, расшифровывать дампы паники, производить поиск по всем конфигурациям, управлять платами, задачами сборки, архивом устройств и правами доступа — напрямую через WebSocket API ESPHome Device Builder.
-
-## 🌟 Возможности
 
 ## 🌟 Возможности
 
@@ -84,14 +82,15 @@
 
 Сервер запускается напрямую из Python-виртуального окружения (venv) — без Docker.
 
-### 1. Установка
+### 1. Клонирование репозитория и установка
 
 ```bash
+git clone https://github.com/farmerkz/ESPHomeLocalMCP.git
 cd ESPHomeLocalMCP
 bash setup.sh
 ```
 
-Скрипт создаст папку `.venv/` и установит зависимости (`mcp`, `websockets`).
+Скрипт создаст папку `.venv/` и установит необходимые зависимости (`mcp`, `websockets`).
 
 ### 2. Конфигурация (.env)
 
@@ -132,7 +131,31 @@ port = 6052
 
 > **Важно:** Укажите абсолютный путь до проекта. Флаг `-u` (unbuffered output для Python) обязателен для корректной работы stdio транспорта протокола MCP.
 
-### 4. Подключение в Antigravity (mcp_config.json)
+### 4. Подключение в Gemini CLI
+
+Для использования сервера с **Gemini CLI** зарегистрируйте его с помощью команды:
+
+```bash
+gemini mcp add esphome-local -- /ПОЛНЫЙ/ПУТЬ/К/ESPHomeLocalMCP/.venv/bin/python -u /ПОЛНЫЙ/ПУТЬ/К/ESPHomeLocalMCP/server.py
+```
+
+Либо добавьте конфигурацию в ваш файл `~/.gemini/config.json`:
+
+```json
+{
+  "mcpServers": {
+    "esphome-local": {
+      "command": "/ПОЛНЫЙ/ПУТЬ/К/ESPHomeLocalMCP/.venv/bin/python",
+      "args": [
+        "-u",
+        "/ПОЛНЫЙ/ПУТЬ/К/ESPHomeLocalMCP/server.py"
+      ]
+    }
+  }
+}
+```
+
+### 5. Подключение в Antigravity (mcp_config.json)
 
 ```json
 {
