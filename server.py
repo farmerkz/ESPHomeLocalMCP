@@ -356,7 +356,12 @@ async def list_devices(host: str = "localhost") -> str:
                     return f"Ошибка получения списка устройств: {data.get('details', data)}"
                 
                 result = data.get("result", {})
-                devices = result.get("devices", []) if isinstance(result, dict) else result
+                if isinstance(result, dict):
+                    devices = result.get("configured", result.get("devices", []))
+                elif isinstance(result, list):
+                    devices = result
+                else:
+                    devices = []
                 
                 if not devices:
                     return "Список устройств пуст или устройства не найдены."
