@@ -174,5 +174,3 @@ port = 6052
 - `mcp` — официальный Python SDK для Model Context Protocol
 - `websockets` — асинхронная работа с WebSocket-соединениями
 - `tomllib` / `tomli` — модуль для парсинга TOML конфигураций из `.env`
-
-> **Примечание:** Файлы `Dockerfile` и `docker-compose.yaml` сохранены в репозитории с пометкой `[DEPRECATED]` для исторической справки. Они больше не используются.
