@@ -24,12 +24,16 @@ logger = logging.getLogger("esphome-mcp")
 FALLBACK_HOST = "localhost"
 FALLBACK_PORT = 6052
 
-def load_env_config() -> tuple[str, int]:
+FALLBACK_SSL = None  # None = автоопределение по порту
+
+def load_env_config() -> tuple[str, int, bool | None]:
     """
-    Загружает IP/хост и порт из файла .env в формате TOML.
-    Возвращает кортеж (host, port).
-    При отсутствии .env или при ошибке парсинга .env используются
-    'localhost' и порт по умолчанию 6052.
+    Загружает IP/хост, порт и флаг SSL из файла .env в формате TOML.
+    Возвращает кортеж (host, port, ssl).
+    - ssl=True  — принудительно wss://
+    - ssl=False — принудительно ws://
+    - ssl=None  — автоопределение: wss:// если port == 443 или 8443
+    При отсутствии .env или при ошибке парсинга используются настройки по умолчанию.
     """
     env_paths = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
@@ -43,11 +47,11 @@ def load_env_config() -> tuple[str, int]:
 
     if not env_file:
         logger.info(f"Файл .env не найден, используются настройки по умолчанию ({FALLBACK_HOST}:{FALLBACK_PORT})")
-        return FALLBACK_HOST, FALLBACK_PORT
+        return FALLBACK_HOST, FALLBACK_PORT, FALLBACK_SSL
 
     if tomllib is None:
         logger.warning(f"Модуль tomllib/tomli недоступен. Используются настройки по умолчанию ({FALLBACK_HOST}:{FALLBACK_PORT})")
-        return FALLBACK_HOST, FALLBACK_PORT
+        return FALLBACK_HOST, FALLBACK_PORT, FALLBACK_SSL
 
     try:
         with open(env_file, "rb") as f:
@@ -56,7 +60,7 @@ def load_env_config() -> tuple[str, int]:
         if not isinstance(data, dict):
             raise ValueError("Содержимое TOML файла должно содержать ключевые пары")
 
-        # Извлекаем хост и порт из корня TOML или секции [api] / [esphome]
+        # Извлекаем хост из корня TOML или секции [api] / [esphome]
         host = (
             data.get("host")
             or data.get("ip")
@@ -84,22 +88,52 @@ def load_env_config() -> tuple[str, int]:
         if not host_str:
             host_str = FALLBACK_HOST
 
-        logger.info(f"Загружены настройки из .env: host={host_str!r}, port={port}")
-        return host_str, port
+        # Читаем явный параметр ssl (bool или None если не задан)
+        ssl_val = (
+            data.get("ssl")
+            or data.get("api", {}).get("ssl")
+            or data.get("esphome", {}).get("ssl")
+        )
+        if ssl_val is None:
+            ssl = FALLBACK_SSL  # автоопределение по порту
+        elif isinstance(ssl_val, bool):
+            ssl = ssl_val
+        else:
+            # Если вдруг строка ("true"/"false") — попробуем разобрать
+            ssl = str(ssl_val).strip().lower() in ("true", "1", "yes")
+
+        logger.info(f"Загружены настройки из .env: host={host_str!r}, port={port}, ssl={ssl!r}")
+        return host_str, port, ssl
 
     except Exception as e:
         logger.warning(f"Ошибка чтения/парсинга .env: {e}. Используются настройки по умолчанию ({FALLBACK_HOST}:{FALLBACK_PORT})")
-        return FALLBACK_HOST, FALLBACK_PORT
+        return FALLBACK_HOST, FALLBACK_PORT, FALLBACK_SSL
 
-DEFAULT_HOST, DEFAULT_PORT = load_env_config()
+DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SSL = load_env_config()
 
-def get_ws_url(host: str | None = None, port: int | None = None) -> str:
+def get_ws_url(host: str | None = None, port: int | None = None, ssl: bool | None = None) -> str:
     """
     Формирует URL подключения к ESPHome WebSocket API.
+
+    Протокол (ws:// / wss://) определяется следующим образом:
+    1. Явный параметр ssl=True/False имеет наивысший приоритет.
+    2. Если ssl=None — используется DEFAULT_SSL из .env.
+    3. Если DEFAULT_SSL тоже None — автоопределение: wss:// для портов 443 и 8443.
     """
     h = host if host else DEFAULT_HOST
     p = port if port is not None else DEFAULT_PORT
-    return f"ws://{h}:{p}/ws"
+
+    # Определяем, нужен ли TLS
+    if ssl is not None:
+        use_ssl = ssl
+    elif DEFAULT_SSL is not None:
+        use_ssl = DEFAULT_SSL
+    else:
+        # Автоопределение по порту
+        use_ssl = p in (443, 8443)
+
+    scheme = "wss" if use_ssl else "ws"
+    return f"{scheme}://{h}:{p}/ws"
 
 # Инициализация MCP сервера
 mcp = FastMCP("esphome-device-builder")
