@@ -25,6 +25,7 @@ from server import (
     manage_labels,
     batch_manage_devices,
     troubleshoot_device,
+    manage_version_history,
     compile_firmware,
     flash_ota,
     get_server_version
@@ -214,6 +215,14 @@ class TestMCPServerUnit(unittest.TestCase):
         self.assertIn("action", sig_tb.parameters)
         self.assertEqual(sig_tb.parameters["action"].default, "probe")
 
+        sig_vh = inspect.signature(manage_version_history)
+        self.assertIn("action", sig_vh.parameters)
+        self.assertEqual(sig_vh.parameters["action"].default, "log")
+        self.assertIn("configuration", sig_vh.parameters)
+        self.assertEqual(sig_vh.parameters["configuration"].default, "")
+        self.assertIn("sha", sig_vh.parameters)
+        self.assertEqual(sig_vh.parameters["sha"].default, "")
+
     def test_manage_device_config_validation(self):
         """Проверка локальной валидации аргументов в manage_device_config."""
         loop = asyncio.new_event_loop()
@@ -372,6 +381,28 @@ class TestMCPServerUnit(unittest.TestCase):
             # 2. Probe без configuration
             res_no_cfg = loop.run_until_complete(troubleshoot_device(action="probe"))
             self.assertIn("необходимо указать параметр 'configuration'", res_no_cfg)
+        finally:
+            loop.close()
+
+    def test_manage_version_history_validation(self):
+        """Проверка локальной валидации аргументов в manage_version_history."""
+        loop = asyncio.new_event_loop()
+        try:
+            # 1. Неизвестное действие
+            res_unknown = loop.run_until_complete(manage_version_history(action="unknown_action"))
+            self.assertIn("неизвестное действие", res_unknown)
+
+            # 2. Show без configuration
+            res_no_cfg = loop.run_until_complete(manage_version_history(action="show"))
+            self.assertIn("необходимо указать параметр 'configuration'", res_no_cfg)
+
+            # 3. Restore без configuration
+            res_no_res_cfg = loop.run_until_complete(manage_version_history(action="restore", sha="123456"))
+            self.assertIn("необходимо указать параметр 'configuration'", res_no_res_cfg)
+
+            # 4. Restore без sha
+            res_no_res_sha = loop.run_until_complete(manage_version_history(action="restore", configuration="test.yaml"))
+            self.assertIn("необходимо указать хэш коммита", res_no_res_sha)
         finally:
             loop.close()
 
@@ -903,6 +934,80 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("DNS разрешение:", res_probe_off)
         self.assertIn("ICMP Ping:", res_probe_off)
         print(f"  - troubleshoot_device (probe ina226.yaml): успешно диагностировано состояние")
+
+    async def test_manage_version_history_log_show_diff(self):
+        """Тестирование чтения истории коммитов, ревизий и diff (action='log', 'show', 'diff', 'deleted')."""
+        print("\n📜 Запуск тестов manage_version_history (log, show, diff, deleted)...")
+
+        # 1. log test.yaml
+        res_log = await manage_version_history(action="log", configuration="test.yaml")
+        self.assertIn("История версий конфигурации `test.yaml`", res_log)
+        print("  - manage_version_history (log test.yaml): история успешно получена")
+
+        # Извлекаем sha первого коммита
+        match = re.search(r"- `([0-9a-fA-F]+)` \|", res_log)
+        self.assertIsNotNone(match)
+        first_sha = match.group(1)
+
+        # 2. show test.yaml at sha
+        res_show = await manage_version_history(action="show", configuration="test.yaml", sha=first_sha)
+        self.assertIn(f"Содержимое `test.yaml` на момент коммита `{first_sha}`", res_show)
+        self.assertIn("esphome:", res_show)
+        print(f"  - manage_version_history (show {first_sha}): ревизия прочитана")
+
+        # 3. diff test.yaml
+        res_diff = await manage_version_history(action="diff", configuration="test.yaml")
+        self.assertTrue("Различия (diff)" in res_diff or "изменения отсутствуют" in res_diff)
+        print("  - manage_version_history (diff): успешно получен отчет сравнения")
+
+        # 4. deleted configs
+        res_del = await manage_version_history(action="deleted")
+        self.assertTrue("Удаленные конфигурации в истории Git" in res_del or "не найдено записей" in res_del)
+        print("  - manage_version_history (deleted): успешно проверена история удалений")
+
+    async def test_manage_version_history_restore_lifecycle(self):
+        """Тестирование полного жизненного цикла отката версии (restore) с Teardown Guard."""
+        print("\n🔄 Запуск теста жизненного цикла manage_version_history (restore)...")
+        uid = uuid.uuid4().hex[:6]
+        cfg = f"mcp-vh-{uid}.yaml"
+
+        content_v1 = f"esphome:\n  name: mcp-vh-{uid}\n  comment: v1_initial_snapshot\nesp32:\n  board: esp32dev\n"
+        content_v2 = f"esphome:\n  name: mcp-vh-{uid}\n  comment: v2_modified_snapshot\nesp32:\n  board: esp32dev\n"
+
+        # 1. Создаем v1
+        create_res = await manage_device_config(action="create", configuration=cfg, content=content_v1)
+        self.assertIn("создана", create_res.lower())
+
+        try:
+            # 2. Получаем sha коммита v1
+            res_log1 = await manage_version_history(action="log", configuration=cfg)
+            match1 = re.search(r"- `([0-9a-fA-F]+)` \|", res_log1)
+            self.assertIsNotNone(match1)
+            sha_v1 = match1.group(1)
+            print(f"  - Создана фикстура v1 ({cfg}), SHA: {sha_v1}")
+
+            # 3. Обновляем до v2
+            upd_res = await manage_device_config(action="update", configuration=cfg, content=content_v2)
+            self.assertIn("обновлена", upd_res.lower())
+
+            # 4. Проверяем, что в текущей версии записано v2
+            get_v2 = await manage_device_config(action="get", configuration=cfg)
+            self.assertIn("v2_modified_snapshot", get_v2)
+
+            # 5. Выполняем restore до v1 (sha_v1)
+            res_restore = await manage_version_history(action="restore", configuration=cfg, sha=sha_v1)
+            self.assertIn("успешно восстановлен", res_restore.lower())
+            print(f"  - Выполнен restore {cfg} до {sha_v1}")
+
+            # 6. Проверяем, что содержимое снова v1
+            get_restored = await manage_device_config(action="get", configuration=cfg)
+            self.assertIn("v1_initial_snapshot", get_restored)
+            print(f"  - Подтверждено: содержимое {cfg} вернулось к v1_initial_snapshot")
+
+        finally:
+            # 7. Teardown Guard: удаление временного файла
+            await manage_device_config(action="delete", configuration=cfg)
+            print(f"  ✅ Teardown: временный файл {cfg} удален.")
 
 
 if __name__ == "__main__":

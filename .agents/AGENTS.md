@@ -32,7 +32,7 @@
 
 ---
 
-## 🛠 Доступные MCP Инструменты (23 инструмента)
+## 🛠 Доступные MCP Инструменты (24 инструмента)
 
 1. **Базовые операции (Compile & Flash):**
    - `validate_yaml(configuration, host, port)` — быстрая валидация YAML (`devices/validate`)
@@ -58,10 +58,11 @@
    - `get_board_info(action, board_id, platform, variant, mcu, tag, query, limit, offset, host, port)` — информация о платах, поиск по чипам/тегам, пагинация и распиновка (`boards/*`)
    - `manage_build_jobs(action, configuration, job_id, status_filter, host, port)` — управление очередью сборки, кэшем, очистка истории задач (`clear`) и сброс отложенных обновлений (`clear_queued`) (`firmware/*`)
 
-4. **Пакетные операции сборки, архивация, безопасность и версия (P2):**
+4. **Пакетные операции сборки, архивация, Git-история, безопасность и версия (P2):**
    - `batch_compile_and_flash(configurations, action, port, force_local, bootloader, host, api_port)` — пакетная компиляция и прошивка (`firmware/*_bulk`)
    - `archive_devices(action, configuration, host, port)` — архивация и восстановление устройств (`devices/*_archived`)
    - `manage_device_labels(configuration, label_ids, host, port)` — управление метками одного устройства (`devices/set_labels`)
+   - `manage_version_history(action, configuration, sha, sha_compare, max_count, config_dir, host, port)` — просмотр истории Git-коммитов (`log`), изменений (`diff`), ревизий (`show`), удаленных файлов (`deleted`) и откат (`restore`)
    - `authenticate_esphome(username, password, token, host, port)` — аутентификация по паролю/токену (`auth/login`)
    - `get_server_version()` — получение информации о версии сервера и протоколе (SemVer)
 

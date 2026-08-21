@@ -6,6 +6,7 @@ import sys
 import logging
 import re
 import os
+import subprocess
 import uuid
 from __version__ import __version__, __version_info__
 
@@ -2433,6 +2434,232 @@ async def troubleshoot_device(
 
     except Exception as e:
         error_msg = f"Критическая ошибка troubleshoot_device ({url}): {str(e)}"
+        logger.error(error_msg)
+        return error_msg
+
+
+def find_git_repo(config_dir: str = "") -> tuple[str, str] | None:
+    """
+    Определяет корневую директорию Git-репозитория и относительный префикс каталога конфигураций.
+    Возвращает кортеж (repo_root, prefix_inside_repo) или None, если репозиторий не найден.
+    """
+    candidates = []
+    if config_dir:
+        candidates.append(os.path.expanduser(config_dir))
+
+    # Стандартные пути поиска каталога конфигураций ESPHome
+    candidates.extend([
+        "/Users/andreyzolotnitskiy/Documents/github/esphome/config",
+        os.path.expanduser("~/Documents/github/esphome/config"),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "esphome", "config")),
+        "/Users/andreyzolotnitskiy/Documents/github/esphome",
+        os.getcwd()
+    ])
+
+    for cand in candidates:
+        if not os.path.exists(cand):
+            continue
+        try:
+            res = subprocess.run(
+                ["git", "-C", cand, "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            repo_root = res.stdout.strip()
+            if repo_root and os.path.isdir(repo_root):
+                cand_abs = os.path.abspath(cand)
+                rel_prefix = os.path.relpath(cand_abs, repo_root)
+                prefix = "" if rel_prefix == "." else rel_prefix.strip("/")
+                return (repo_root, prefix)
+        except Exception:
+            continue
+    return None
+
+
+@mcp.tool()
+async def manage_version_history(
+    action: str = "log",
+    configuration: str = "",
+    sha: str = "",
+    sha_compare: str = "",
+    max_count: int = 10,
+    config_dir: str = "",
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
+) -> str:
+    """
+    Инструмент 24 (P2): История версий конфигураций и откат изменений (Git Version History).
+
+    Позволяет агенту просматривать историю изменений YAML-конфигураций ESPHome,
+    получать diff между ревизиями, просматривать содержимое старых версий,
+    находить удаленные конфигурации и восстанавливать файлы до выбранного коммита.
+
+    Параметр action поддерживает:
+      - "log"      — история коммитов по файлу или всему каталогу (sha, дата, автор, сообщение)
+      - "diff"     — просмотр изменений (рабочая копия vs HEAD, либо между sha и sha_compare)
+      - "show"     — чтение содержимого файла конфигурации на момент коммита sha
+      - "deleted"  — поиск удаленных ранее файлов конфигураций в истории Git
+      - "restore"  — откат/восстановление файла до состояния коммита sha (через API устройств)
+
+    Параметры:
+      - action:        режим работы ("log", "diff", "show", "deleted", "restore")
+      - configuration: имя YAML-файла устройства (например "test.yaml", "liligo-t-internet.yaml")
+      - sha:           хэш Git-коммита (например "a11f8af", "HEAD~1")
+      - sha_compare:   второй хэш коммита для сравнения в diff (опционально)
+      - max_count:     максимальное количество записей в истории (по умолчанию 10)
+      - config_dir:    путь к каталогу конфигураций (опционально, определяется автоматически)
+      - host:          хост сервера ESPHome
+      - port:          сетевой порт WebSocket API ESPHome
+    """
+    action = action.strip().lower()
+    valid_actions = ("log", "list", "diff", "show", "get", "deleted", "list_deleted", "restore")
+    if action not in valid_actions:
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: log, diff, show, deleted, restore."
+
+    cfg_clean = resolve_configuration(configuration) if configuration else ""
+
+    if action in ("show", "get") and not cfg_clean:
+        return "Ошибка: для действия 'show' необходимо указать параметр 'configuration' (YAML-файл устройства)."
+    if action == "restore":
+        if not cfg_clean:
+            return "Ошибка: для действия 'restore' необходимо указать параметр 'configuration' (YAML-файл устройства)."
+        if not sha.strip():
+            return "Ошибка: для действия 'restore' необходимо указать хэш коммита в параметре 'sha'."
+
+    repo_info = find_git_repo(config_dir)
+    if not repo_info:
+        return "Ошибка: не удалось обнаружить Git-репозиторий с конфигурациями ESPHome. Укажите путь через параметр 'config_dir'."
+
+    repo_root, prefix = repo_info
+    rel_file = f"{prefix}/{cfg_clean}".lstrip("/") if cfg_clean else ""
+
+    logger.info(f"manage_version_history: action={action!r}, configuration={cfg_clean!r}, repo={repo_root!r}")
+
+    try:
+        if action in ("log", "list"):
+            count = max(1, min(max_count, 100))
+            cmd = ["git", "-C", repo_root, "log", f"-n{count}", "--pretty=format:%h|%an|%ad|%s", "--date=short"]
+            if rel_file:
+                cmd.extend(["--", rel_file])
+            elif prefix:
+                cmd.extend(["--", f"{prefix}/*.yaml"])
+
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode != 0:
+                return f"Ошибка выполнения git log: {res.stderr.strip()}"
+
+            lines = [l.strip() for l in res.stdout.strip().split("\n") if l.strip()]
+            if not lines:
+                target_str = f"`{cfg_clean}`" if cfg_clean else "каталога конфигураций"
+                return f"История изменений для {target_str} не найдена или файл еще не был закоммичен."
+
+            target_header = f"конфигурации `{cfg_clean}`" if cfg_clean else "всех конфигураций ESPHome"
+            output = [f"### 📜 История версий {target_header} ({len(lines)} коммитов):\n"]
+            for line in lines:
+                parts = line.split("|", 3)
+                if len(parts) == 4:
+                    c_sha, c_author, c_date, c_msg = parts
+                    output.append(f"- `{c_sha}` | **{c_date}** | {c_author} — *{c_msg}*")
+                else:
+                    output.append(f"- {line}")
+
+            output.append("\n💡 Для просмотра изменений используйте `manage_version_history action=diff sha=<хэш>`")
+            return "\n".join(output)
+
+        elif action == "diff":
+            cmd = ["git", "-C", repo_root, "diff"]
+            if sha and sha_compare:
+                cmd.extend([sha_compare, sha])
+            elif sha:
+                cmd.append(sha)
+            else:
+                cmd.append("HEAD")
+
+            if rel_file:
+                cmd.extend(["--", rel_file])
+            elif prefix:
+                cmd.extend(["--", f"{prefix}/*.yaml"])
+
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode != 0:
+                return f"Ошибка выполнения git diff: {res.stderr.strip()}"
+
+            diff_text = res.stdout.strip()
+            if not diff_text:
+                target_str = f"`{cfg_clean}`" if cfg_clean else "каталога конфигураций"
+                ref_str = f"({sha_compare} ↔ {sha})" if (sha and sha_compare) else (f"(ревизия {sha})" if sha else "(HEAD vs Working Tree)")
+                return f"Нет различий (diff) для {target_str} {ref_str} — изменения отсутствуют."
+
+            target_header = f"`{cfg_clean}`" if cfg_clean else "конфигураций"
+            return f"### 🔀 Различия (diff) для {target_header}:\n\n```diff\n{diff_text}\n```"
+
+        elif action in ("show", "get"):
+            if not cfg_clean:
+                return "Ошибка: для действия 'show' необходимо указать параметр 'configuration' (YAML-файл устройства)."
+            sha_target = sha.strip() or "HEAD"
+            git_path = f"{sha_target}:{rel_file}"
+
+            res = subprocess.run(["git", "-C", repo_root, "show", git_path], capture_output=True, text=True)
+            if res.returncode != 0:
+                return f"Ошибка чтения ревизии {git_path}: {res.stderr.strip()}"
+
+            return f"### 📄 Содержимое `{cfg_clean}` на момент коммита `{sha_target}`:\n\n```yaml\n{res.stdout.strip()}\n```"
+
+        elif action in ("deleted", "list_deleted"):
+            count = max(1, min(max_count, 100))
+            pattern = f"{prefix}/*.yaml" if prefix else "*.yaml"
+            cmd = ["git", "-C", repo_root, "log", "--diff-filter=D", "--summary", f"-n{count}", "--", pattern]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode != 0:
+                return f"Ошибка поиска удаленных файлов: {res.stderr.strip()}"
+
+            raw_out = res.stdout.strip()
+            if not raw_out:
+                return "В истории Git не найдено записей об удалении YAML-конфигураций."
+
+            return f"### 🗑 Удаленные конфигурации в истории Git:\n\n```text\n{raw_out}\n```\n\n💡 Для восстановления удаленного файла используйте:\n`manage_version_history action=\"restore\" configuration=\"<имя_файла>\" sha=\"<хэш_коммита~1>\"`"
+
+        elif action == "restore":
+            if not cfg_clean:
+                return "Ошибка: для действия 'restore' необходимо указать параметр 'configuration' (YAML-файл устройства)."
+            if not sha.strip():
+                return "Ошибка: для действия 'restore' необходимо указать хэш коммита в параметре 'sha'."
+
+            sha_target = sha.strip()
+            git_path = f"{sha_target}:{rel_file}"
+
+            res = subprocess.run(["git", "-C", repo_root, "show", git_path], capture_output=True, text=True)
+            if res.returncode != 0:
+                return f"Ошибка извлечения версии `{git_path}` для отката: {res.stderr.strip()}"
+
+            restored_content = res.stdout
+            # Применяем восстановленное содержимое через API устройства
+            apply_res = await manage_device_config(
+                action="update",
+                configuration=cfg_clean,
+                content=restored_content,
+                host=host,
+                port=port
+            )
+
+            # Если файл ранее был удален и не найден, создаем его заново
+            if "not found" in apply_res.lower() or "не найден" in apply_res.lower():
+                apply_res = await manage_device_config(
+                    action="create",
+                    configuration=cfg_clean,
+                    content=restored_content,
+                    host=host,
+                    port=port
+                )
+
+            if "ошибка" in apply_res.lower() and "успешно" not in apply_res.lower():
+                return f"Ошибка применения восстановленной конфигурации `{cfg_clean}`: {apply_res}"
+
+            return f"### 🔄 Восстановление конфигурации `{cfg_clean}`:\n\n✅ Файл `{cfg_clean}` успешно восстановлен до состояния коммита `{sha_target}` и сохранен через API ESPHome!"
+
+    except Exception as e:
+        error_msg = f"Критическая ошибка manage_version_history: {str(e)}"
         logger.error(error_msg)
         return error_msg
 
