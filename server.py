@@ -874,8 +874,12 @@ async def get_board_info(
     action: str = "list",
     board_id: str = "",
     platform: str = "",
+    variant: str = "",
+    mcu: str = "",
+    tag: str = "",
     query: str = "",
     limit: int = 20,
+    offset: int = 0,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT
 ) -> str:
@@ -883,15 +887,21 @@ async def get_board_info(
     Инструмент 10 (P1): Получение информации о платах из каталога ESPHome.
 
     Параметр action поддерживает следующие действия:
-      - "list"        — поиск/список плат (с фильтрами query, platform, limit)
+      - "list"        — поиск/список плат (с фильтрами query, platform, variant, mcu, tag, limit, offset)
       - "get"         — получить полную информацию о плате (требует board_id)
       - "compatible"  — список совместимых/взаимозаменяемых плат (требует board_id)
 
     Параметры:
       - board_id:  ID платы, например "esp32dev", "nodemcuv2", "lolin32"
-      - platform:  фильтр по платформе: "esp32", "esp8266", "rp2040", "nrf52840"
+      - platform:  фильтр по платформе: "esp32", "esp8266", "rp2040", "nrf52840", "host", "bk72xx", "rtl87xx"
+      - variant:   фильтр по варианту MCU/чипа (например "esp32c3", "esp32c6", "esp32s2", "esp32s3", "rp2040", "rp2350")
+      - mcu:       фильтр по микроконтроллеру (например "esp32", "esp32c3", "rp2040")
+      - tag:       фильтр по тегу плат (например "featured", "eth", "poe", "display", "battery")
       - query:     строка поиска (название платы, MCU, производитель)
       - limit:     максимальное количество результатов (по умолчанию 20)
+      - offset:    смещение для пагинации (по умолчанию 0)
+      - host:      хост сервера ESPHome
+      - port:      сетевой порт WebSocket API ESPHome
     """
     url = get_ws_url(host, port)
     msg_id = "board_info_1"
@@ -906,10 +916,18 @@ async def get_board_info(
     if action == "list":
         command = "boards/get_boards"
         args: dict = {"limit": limit}
+        if offset > 0:
+            args["offset"] = offset
         if query:
             args["query"] = query
         if platform:
             args["platform"] = platform
+        if variant:
+            args["variant"] = variant
+        if mcu:
+            args["mcu"] = mcu
+        if tag:
+            args["tag"] = tag
     elif action == "get":
         command = "boards/get_board"
         args = {"board_id": board_id}
@@ -1035,22 +1053,26 @@ async def manage_build_jobs(
     Инструмент 11 (P1): Управление очередью компиляции и сборки устройств ESPHome.
 
     Параметр action поддерживает следующие действия:
-      - "list"        — список задач (с фильтрацией по status_filter и/или configuration)
-      - "get"         — получить полную информацию о задаче (требует job_id)
-      - "cancel"      — отменить задачу (требует job_id)
-      - "clean"       — очистить каталог сборки конкретного устройства (требует configuration)
-      - "reset_env"   — глобальный сброс .esphome/ (PlatformIO, external_components, build)
+      - "list"         — список задач (с фильтрацией по status_filter и/или configuration)
+      - "get"          — получить полную информацию о задаче (требует job_id)
+      - "cancel"       — отменить задачу (требует job_id)
+      - "clean"        — очистить каталог сборки конкретного устройства (требует configuration)
+      - "reset_env"    — глобальный сброс .esphome/ (PlatformIO, external_components, build)
+      - "clear"        — очистить историю завершенных задач из памяти (опционально status_filter)
+      - "clear_queued" — отменить отложенное обновление устройства (deferred install, требует configuration)
 
     Параметры:
       - configuration:  имя YAML-файла устройства (например "test.yaml")
       - job_id:         идентификатор задачи (для get, cancel)
       - status_filter:  фильтр по статусу: "queued", "running", "completed", "failed", "cancelled"
+      - host:           хост сервера ESPHome
+      - port:           сетевой порт WebSocket API ESPHome
     """
     url = get_ws_url(host, port)
     msg_id = "build_jobs_1"
     action = action.strip().lower()
 
-    valid_actions = ("list", "get", "cancel", "clean", "reset_env")
+    valid_actions = ("list", "get", "cancel", "clean", "reset_env", "clear", "clear_queued")
     if action not in valid_actions:
         return f"Ошибка: неизвестное действие '{action}'. Допустимые: {', '.join(valid_actions)}."
 
@@ -1060,14 +1082,18 @@ async def manage_build_jobs(
         return "Ошибка: для действия 'cancel' необходимо указать параметр job_id."
     if action == "clean" and not configuration:
         return "Ошибка: для действия 'clean' необходимо указать параметр configuration."
+    if action == "clear_queued" and not configuration:
+        return "Ошибка: для действия 'clear_queued' необходимо указать параметр configuration."
+
+    config_clean = resolve_configuration(configuration) if configuration else ""
 
     if action == "list":
         command = "firmware/get_jobs"
         args: dict = {}
         if status_filter:
             args["status"] = status_filter
-        if configuration:
-            args["configuration"] = configuration
+        if config_clean:
+            args["configuration"] = config_clean
     elif action == "get":
         command = "firmware/get_job"
         args = {"job_id": job_id}
@@ -1076,12 +1102,20 @@ async def manage_build_jobs(
         args = {"job_id": job_id}
     elif action == "clean":
         command = "firmware/clean"
-        args = {"configuration": configuration}
+        args = {"configuration": config_clean}
     elif action == "reset_env":
         command = "firmware/reset_build_env"
         args = {}
+    elif action == "clear":
+        command = "firmware/clear"
+        args = {}
+        if status_filter:
+            args["status"] = status_filter
+    elif action == "clear_queued":
+        command = "firmware/clear_queued_update"
+        args = {"configuration": config_clean}
 
-    logger.info(f"manage_build_jobs: action={action!r}, configuration={configuration!r}, job_id={job_id!r}")
+    logger.info(f"manage_build_jobs: action={action!r}, configuration={config_clean!r}, job_id={job_id!r}")
     try:
         async with websockets.connect(url, ping_interval=None) as ws:
             first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
@@ -1185,6 +1219,14 @@ async def manage_build_jobs(
 
                 elif action == "cancel":
                     return f"✅ Задача `{job_id}` успешно отменена."
+
+                elif action == "clear":
+                    cleared_count = result.get("cleared") if isinstance(result, dict) else (len(result) if isinstance(result, list) else None)
+                    count_str = f" ({cleared_count} шт.)" if cleared_count is not None else ""
+                    return f"✅ История завершенных задач сборки успешно очищена{count_str}."
+
+                elif action == "clear_queued":
+                    return f"✅ Отложенное обновление для `{config_clean}` успешно сброшено."
 
     except Exception as e:
         error_msg = f"Критическая ошибка manage_build_jobs ({url}): {str(e)}"

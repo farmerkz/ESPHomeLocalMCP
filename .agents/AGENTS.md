@@ -48,8 +48,8 @@
 
 3. **Управление конфигурациями, платами и сборками (P1):**
    - `manage_device_config(action, configuration, content, new_name, board_id, friendly_name, ssid, psk, config_only, overwrite, allow_wipe, host, port)` — CRUD операций с YAML, генерация по шаблону платы, secrets, офлайн/онлайн переименование (`devices/*`)
-   - `get_board_info(action, board_id, platform, query, limit, host, port)` — информация о платах и их совместимости (`boards/*`)
-   - `manage_build_jobs(action, configuration, job_id, status_filter, host, port)` — управление очередью компиляции и кэшем (`firmware/*`)
+   - `get_board_info(action, board_id, platform, variant, mcu, tag, query, limit, offset, host, port)` — информация о платах, поиск по чипам/тегам, пагинация и распиновка (`boards/*`)
+   - `manage_build_jobs(action, configuration, job_id, status_filter, host, port)` — управление очередью сборки, кэшем, очистка истории задач (`clear`) и сброс отложенных обновлений (`clear_queued`) (`firmware/*`)
 
 4. **Пакетные операции, архивация, безопасность и версия (P2):**
    - `batch_compile_and_flash(configurations, action, port, force_local, bootloader, host, api_port)` — пакетная компиляция и прошивка (`firmware/*_bulk`)

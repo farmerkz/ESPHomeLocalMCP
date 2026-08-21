@@ -17,6 +17,7 @@ from server import (
     search_yaml_configs,
     get_board_info,
     manage_device_config,
+    manage_build_jobs,
     compile_firmware,
     flash_ota,
     get_server_version
@@ -77,7 +78,9 @@ class TestMCPServerUnit(unittest.TestCase):
             flash_ota,
             compile_and_flash,
             batch_compile_and_flash,
-            manage_device_config
+            manage_device_config,
+            get_board_info,
+            manage_build_jobs
         )
 
         sig_compile = inspect.signature(compile_firmware)
@@ -118,6 +121,26 @@ class TestMCPServerUnit(unittest.TestCase):
         self.assertIn("overwrite", sig_manage.parameters)
         self.assertTrue(sig_manage.parameters["overwrite"].default)
 
+        sig_board = inspect.signature(get_board_info)
+        self.assertIn("variant", sig_board.parameters)
+        self.assertEqual(sig_board.parameters["variant"].default, "")
+        self.assertIn("mcu", sig_board.parameters)
+        self.assertEqual(sig_board.parameters["mcu"].default, "")
+        self.assertIn("tag", sig_board.parameters)
+        self.assertEqual(sig_board.parameters["tag"].default, "")
+        self.assertIn("offset", sig_board.parameters)
+        self.assertEqual(sig_board.parameters["offset"].default, 0)
+        self.assertIn("limit", sig_board.parameters)
+        self.assertEqual(sig_board.parameters["limit"].default, 20)
+
+        sig_jobs = inspect.signature(manage_build_jobs)
+        self.assertIn("configuration", sig_jobs.parameters)
+        self.assertEqual(sig_jobs.parameters["configuration"].default, "")
+        self.assertIn("job_id", sig_jobs.parameters)
+        self.assertEqual(sig_jobs.parameters["job_id"].default, "")
+        self.assertIn("status_filter", sig_jobs.parameters)
+        self.assertEqual(sig_jobs.parameters["status_filter"].default, "")
+
     def test_manage_device_config_validation(self):
         """Проверка локальной валидации аргументов в manage_device_config."""
         loop = asyncio.new_event_loop()
@@ -137,6 +160,32 @@ class TestMCPServerUnit(unittest.TestCase):
             # 4. Rename без new_name
             res_no_rename = loop.run_until_complete(manage_device_config(action="rename", configuration="test.yaml"))
             self.assertIn("необходимо указать параметр new_name", res_no_rename)
+        finally:
+            loop.close()
+
+    def test_manage_build_jobs_validation(self):
+        """Проверка локальной валидации аргументов в manage_build_jobs."""
+        loop = asyncio.new_event_loop()
+        try:
+            # 1. Неизвестное действие
+            res_unknown = loop.run_until_complete(manage_build_jobs(action="unknown_action"))
+            self.assertIn("неизвестное действие", res_unknown)
+
+            # 2. Get без job_id
+            res_no_jid = loop.run_until_complete(manage_build_jobs(action="get"))
+            self.assertIn("необходимо указать параметр job_id", res_no_jid)
+
+            # 3. Cancel без job_id
+            res_no_cancel_jid = loop.run_until_complete(manage_build_jobs(action="cancel"))
+            self.assertIn("необходимо указать параметр job_id", res_no_cancel_jid)
+
+            # 4. Clean без configuration
+            res_no_cfg = loop.run_until_complete(manage_build_jobs(action="clean"))
+            self.assertIn("необходимо указать параметр configuration", res_no_cfg)
+
+            # 5. Clear_queued без configuration
+            res_no_queued_cfg = loop.run_until_complete(manage_build_jobs(action="clear_queued"))
+            self.assertIn("необходимо указать параметр configuration", res_no_queued_cfg)
         finally:
             loop.close()
 
@@ -296,6 +345,46 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
             await manage_device_config(action="delete", configuration=cfg_file)
             await manage_device_config(action="delete", configuration=renamed_cfg_file)
             print("  ✅ Teardown завершен.")
+
+    async def test_get_board_info_extended_filters(self):
+        """Тестирование расширенной фильтрации каталога плат (variant, platform, limit, offset)."""
+        print("\n🔍 Запуск тестов расширенной фильтрации get_board_info...")
+
+        # 1. Поиск по variant="esp32c3"
+        res_c3 = await get_board_info(action="list", platform="esp32", variant="esp32c3", limit=5)
+        self.assertIn("Каталог плат ESPHome", res_c3)
+        self.assertIn("esp32c3", res_c3.lower())
+        print(f"  - get_board_info (variant='esp32c3'): найдено плат")
+
+        # 2. Поиск по platform="rp2040"
+        res_rp = await get_board_info(action="list", platform="rp2040", limit=5)
+        self.assertIn("Каталог плат ESPHome", res_rp)
+        self.assertIn("rp2040", res_rp.lower())
+        print(f"  - get_board_info (platform='rp2040'): найдено плат")
+
+        # 3. Пагинация (limit + offset)
+        res_page = await get_board_info(action="list", limit=3, offset=3)
+        self.assertIn("Каталог плат ESPHome", res_page)
+        print(f"  - get_board_info (limit=3, offset=3): пагинация работает")
+
+    async def test_manage_build_jobs_actions(self):
+        """Тестирование расширенных действий управления задачами сборки (list, clear, clear_queued)."""
+        print("\n⚙️ Запуск тестов действий manage_build_jobs...")
+
+        # 1. Получение списка задач
+        list_res = await manage_build_jobs(action="list")
+        self.assertTrue("Задачи сборки ESPHome" in list_res or "Задачи в очереди не найдены" in list_res)
+        print(f"  - manage_build_jobs (action='list'): {list_res[:100]}...")
+
+        # 2. Очистка истории задач (firmware/clear)
+        clear_res = await manage_build_jobs(action="clear")
+        self.assertIn("успешно очищена", clear_res)
+        print(f"  - manage_build_jobs (action='clear'): {clear_res}")
+
+        # 3. Сброс отложенного обновления устройства (firmware/clear_queued_update)
+        queued_res = await manage_build_jobs(action="clear_queued", configuration="test.yaml")
+        self.assertIn("успешно сброшено", queued_res)
+        print(f"  - manage_build_jobs (action='clear_queued'): {queued_res}")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # ESPHome Local MCP Server
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](CHANGELOG.md)
 [![SemVer 2.0.0](https://img.shields.io/badge/SemVer-2.0.0-green.svg)](https://semver.org/)
 [![Documentation](https://img.shields.io/badge/docs-API.md-orange.svg)](https://github.com/esphome/device-builder/blob/main/docs/API.md)
 
@@ -55,8 +55,8 @@
 | # | Инструмент | API-команды | Описание |
 |---|-----------|-------------|----------|
 | 9 | `manage_device_config(action, configuration, content, new_name, board_id, friendly_name, ssid, psk, config_only, overwrite, allow_wipe, host, port)` | `devices/get_config`, `devices/update_config`, `devices/create`, `devices/rename`, `devices/delete` | Управление YAML: CRUD, создание по шаблону платы (`board_id`), интеграция с `secrets.yaml` (Wi-Fi), офлайн (`config_only=True`) и онлайн (`config_only=False`) переименование |
-| 10 | `get_board_info(action, board_id, platform, query, limit, host, port)` | `boards/get_boards`, `boards/get_board`, `boards/get_compatible_boards` | Каталог плат ESPHome: поиск, полная информация (распиновка, features, docs), список взаимозаменяемых плат |
-| 11 | `manage_build_jobs(action, configuration, job_id, status_filter, host, port)` | `firmware/get_jobs`, `firmware/get_job`, `firmware/cancel`, `firmware/clean`, `firmware/reset_build_env` | Управление очередью сборки: просмотр задач, отмена, очистка кэша сборки устройства, глобальный сброс `.esphome/` |
+| 10 | `get_board_info(action, board_id, platform, variant, mcu, tag, query, limit, offset, host, port)` | `boards/get_boards`, `boards/get_board`, `boards/get_compatible_boards` | Каталог плат ESPHome: поиск по платформе, чипу (`variant`), MCU, тегам, пагинация (`offset`), полная распиновка и совместимость |
+| 11 | `manage_build_jobs(action, configuration, job_id, status_filter, host, port)` | `firmware/get_jobs`, `firmware/get_job`, `firmware/cancel`, `firmware/clean`, `firmware/reset_build_env`, `firmware/clear`, `firmware/clear_queued_update` | Управление сборками: мониторинг задач, отмена, очистка кэша, сброс окружения, очистка истории задач (`clear`), сброс отложенных обновлений (`clear_queued`) |
 
 ---
 
