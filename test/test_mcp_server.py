@@ -22,6 +22,8 @@ from server import (
     search_components,
     manage_secrets,
     get_host_info,
+    manage_labels,
+    batch_manage_devices,
     compile_firmware,
     flash_ota,
     get_server_version
@@ -185,6 +187,26 @@ class TestMCPServerUnit(unittest.TestCase):
         self.assertIn("action", sig_host.parameters)
         self.assertEqual(sig_host.parameters["action"].default, "version")
 
+        sig_lbl = inspect.signature(manage_labels)
+        self.assertIn("action", sig_lbl.parameters)
+        self.assertEqual(sig_lbl.parameters["action"].default, "list")
+        self.assertIn("label_id", sig_lbl.parameters)
+        self.assertEqual(sig_lbl.parameters["label_id"].default, "")
+        self.assertIn("name", sig_lbl.parameters)
+        self.assertEqual(sig_lbl.parameters["name"].default, "")
+        self.assertIn("color", sig_lbl.parameters)
+        self.assertEqual(sig_lbl.parameters["color"].default, "")
+
+        sig_bulk = inspect.signature(batch_manage_devices)
+        self.assertIn("action", sig_bulk.parameters)
+        self.assertEqual(sig_bulk.parameters["action"].default, "archive")
+        self.assertIn("configurations", sig_bulk.parameters)
+        self.assertEqual(sig_bulk.parameters["configurations"].default, None)
+        self.assertIn("label_ids", sig_bulk.parameters)
+        self.assertEqual(sig_bulk.parameters["label_ids"].default, None)
+        self.assertIn("updates", sig_bulk.parameters)
+        self.assertEqual(sig_bulk.parameters["updates"].default, None)
+
     def test_manage_device_config_validation(self):
         """Проверка локальной валидации аргументов в manage_device_config."""
         loop = asyncio.new_event_loop()
@@ -281,6 +303,54 @@ class TestMCPServerUnit(unittest.TestCase):
         try:
             res_unknown = loop.run_until_complete(get_host_info(action="unknown_action"))
             self.assertIn("неизвестное действие", res_unknown)
+        finally:
+            loop.close()
+
+    def test_manage_labels_validation(self):
+        """Проверка локальной валидации аргументов в manage_labels."""
+        loop = asyncio.new_event_loop()
+        try:
+            # 1. Неизвестное действие
+            res_unknown = loop.run_until_complete(manage_labels(action="unknown_action"))
+            self.assertIn("неизвестное действие", res_unknown)
+
+            # 2. Create без name
+            res_no_name = loop.run_until_complete(manage_labels(action="create"))
+            self.assertIn("необходимо указать параметр 'name'", res_no_name)
+
+            # 3. Update без label_id
+            res_no_lid = loop.run_until_complete(manage_labels(action="update", name="Tag"))
+            self.assertIn("необходимо указать параметр 'label_id'", res_no_lid)
+
+            # 4. Update без name и без color
+            res_no_upd = loop.run_until_complete(manage_labels(action="update", label_id="abc"))
+            self.assertIn("необходимо указать хотя бы один изменяемый параметр", res_no_upd)
+
+            # 5. Delete без label_id
+            res_no_del_lid = loop.run_until_complete(manage_labels(action="delete"))
+            self.assertIn("необходимо указать параметр 'label_id'", res_no_del_lid)
+        finally:
+            loop.close()
+
+    def test_batch_manage_devices_validation(self):
+        """Проверка локальной валидации аргументов в batch_manage_devices."""
+        loop = asyncio.new_event_loop()
+        try:
+            # 1. Неизвестное действие
+            res_unknown = loop.run_until_complete(batch_manage_devices(action="unknown_action"))
+            self.assertIn("неизвестное действие", res_unknown)
+
+            # 2. Archive без configurations
+            res_no_arc_cfg = loop.run_until_complete(batch_manage_devices(action="archive"))
+            self.assertIn("необходимо передать список 'configurations'", res_no_arc_cfg)
+
+            # 3. Delete без configurations
+            res_no_del_cfg = loop.run_until_complete(batch_manage_devices(action="delete"))
+            self.assertIn("необходимо передать список 'configurations'", res_no_del_cfg)
+
+            # 4. Set_labels без configurations и без updates
+            res_no_lbl_args = loop.run_until_complete(batch_manage_devices(action="set_labels"))
+            self.assertIn("необходимо передать либо 'configurations'", res_no_lbl_args)
         finally:
             loop.close()
 
@@ -678,6 +748,112 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Информация о сервере ESPHome", all_res)
         self.assertIn("Подключенные USB-Serial порты хоста", all_res)
         print(f"  - get_host_info (action='all'): успешно получена сводная информация")
+
+    async def test_manage_labels_lifecycle(self):
+        """Тестирование полного CRUD жизненного цикла каталога меток (manage_labels)."""
+        print("\n🏷 Запуск тестов жизненного цикла manage_labels...")
+
+        uid = uuid.uuid4().hex[:6]
+        tag_name = f"TestTag_{uid}"
+        upd_name = f"UpdTag_{uid}"
+        tag_color = "#112233"
+        upd_color = "#445566"
+        created_lid = None
+
+        try:
+            # 1. Создание метки
+            create_res = await manage_labels(action="create", name=tag_name, color=tag_color)
+            self.assertIn(f"Метка `{tag_name}`", create_res)
+            self.assertIn("успешно создана", create_res)
+            print(f"  - manage_labels (create): {create_res}")
+
+            # 2. Получение списка меток и поиск созданной
+            list_res = await manage_labels(action="list")
+            self.assertIn(tag_name, list_res)
+            print("  - manage_labels (list): метка найдена в каталоге")
+
+            # Извлекаем ID метки из текста ответа
+            match = re.search(rf"- \*\*{tag_name}\*\*.*?ID: `([a-f0-9]+)`", list_res)
+            self.assertIsNotNone(match, "ID созданной метки не найден в выводе manage_labels action='list'")
+            created_lid = match.group(1)
+
+            # 3. Обновление метки (имя и цвет)
+            upd_res = await manage_labels(action="update", label_id=created_lid, name=upd_name, color=upd_color)
+            self.assertIn("успешно обновлена", upd_res)
+            self.assertIn(upd_name, upd_res)
+            print(f"  - manage_labels (update): {upd_res}")
+
+            # 4. Проверка обновленного списка
+            list_upd = await manage_labels(action="list")
+            self.assertIn(upd_name, list_upd)
+            self.assertNotIn(tag_name, list_upd)
+
+            # 5. Удаление метки
+            del_res = await manage_labels(action="delete", label_id=created_lid)
+            self.assertIn("успешно удалена", del_res)
+            print(f"  - manage_labels (delete): {del_res}")
+
+            # 6. Проверка отсутствия в каталоге
+            final_list = await manage_labels(action="list")
+            self.assertNotIn(upd_name, final_list)
+
+        finally:
+            # Teardown Guard: если созданная метка не была удалена
+            if created_lid:
+                await manage_labels(action="delete", label_id=created_lid)
+
+    async def test_batch_manage_devices_lifecycle(self):
+        """Тестирование пакетных операций над устройствами (batch_manage_devices)."""
+        print("\n📦 Запуск тестов пакетных операций batch_manage_devices...")
+
+        uid = uuid.uuid4().hex[:6]
+        cfg1 = f"mcp-bulk-1-{uid}.yaml"
+        cfg2 = f"mcp-bulk-2-{uid}.yaml"
+        tag_name = f"BulkTag_{uid}"
+        created_lid = None
+
+        # 1. Создаем временную метку
+        lbl_res = await manage_labels(action="create", name=tag_name, color="#00aa00")
+        match = re.search(r"ID: `([a-f0-9]+)`", lbl_res)
+        if match:
+            created_lid = match.group(1)
+
+        # 2. Создаем две временные фикстуры устройств
+        yaml_content = f"esphome:\n  name: mcp-bulk-{uid}\nesp32:\n  board: esp32dev\n"
+        await manage_device_config(action="create", configuration=cfg1, content=yaml_content)
+        await manage_device_config(action="create", configuration=cfg2, content=yaml_content)
+
+        try:
+            # 3. Пакетное назначение меток (set_labels)
+            if created_lid:
+                bulk_lbl_res = await batch_manage_devices(
+                    action="set_labels",
+                    configurations=[cfg1, cfg2],
+                    label_ids=[created_lid]
+                )
+                self.assertIn("Результат пакетной операции `set_labels`", bulk_lbl_res)
+                self.assertIn(f"`{cfg1}`: ✅ Успешно", bulk_lbl_res)
+                self.assertIn(f"`{cfg2}`: ✅ Успешно", bulk_lbl_res)
+                print(f"  - batch_manage_devices (set_labels): метки успешно назначены на {cfg1} и {cfg2}")
+
+            # 4. Пакетная архивация (archive)
+            bulk_arc_res = await batch_manage_devices(
+                action="archive",
+                configurations=[cfg1, cfg2]
+            )
+            self.assertIn("Результат пакетной операции `archive`", bulk_arc_res)
+            self.assertIn(f"`{cfg1}`: ✅ Успешно", bulk_arc_res)
+            self.assertIn(f"`{cfg2}`: ✅ Успешно", bulk_arc_res)
+            print(f"  - batch_manage_devices (archive): устройства успешно перемещены в архив")
+
+        finally:
+            # 5. Teardown Guard: очистка архивных фикстур и удаление временной метки
+            from server import archive_devices
+            await archive_devices(action="purge", configuration=cfg1)
+            await archive_devices(action="purge", configuration=cfg2)
+            if created_lid:
+                await manage_labels(action="delete", label_id=created_lid)
+            print("  ✅ Teardown пакетных фикстур завершен.")
 
 
 if __name__ == "__main__":

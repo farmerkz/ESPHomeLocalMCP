@@ -2027,6 +2027,240 @@ async def manage_device_labels(
 
 
 @mcp.tool()
+async def manage_labels(
+    action: str = "list",
+    label_id: str = "",
+    name: str = "",
+    color: str = "",
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
+) -> str:
+    """
+    Инструмент 21 (P1): Управление глобальным каталогом меток устройств ESPHome.
+
+    Позволяет агенту создавать, редактировать, просматривать и удалять метки
+    (теги) парка устройств с цветовой кодировкой (#RRGGBB).
+
+    Параметр action поддерживает:
+      - "list"   — просмотр всех меток в каталоге (id, name, color)
+      - "create" — создание новой метки (требует name, опционально color)
+      - "update" — изменение названия или цвета метки (требует label_id, name/color)
+      - "delete" — удаление метки из каталога и автоматическое снятие с устройств (требует label_id)
+
+    Параметры:
+      - label_id: уникальный ID метки (например "377c4f61e3f74fd8bf3ed7f0c44f71b9")
+      - name:     название метки (например "Living Room", "Battery Powered")
+      - color:    цвет метки в формате HEX (#rrggbb, например "#ff5733")
+      - host:     хост сервера ESPHome
+      - port:     сетевой порт WebSocket API ESPHome
+    """
+    url = get_ws_url(host, port)
+    msg_id = "labels_tool_1"
+    action = action.strip().lower()
+
+    valid_actions = ("list", "create", "update", "delete")
+    if action not in valid_actions:
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: {', '.join(valid_actions)}."
+
+    if action == "list":
+        command = "labels/list"
+        args = {}
+    elif action == "create":
+        if not name:
+            return "Ошибка: для действия 'create' необходимо указать параметр 'name' (название метки)."
+        command = "labels/create"
+        args = {"name": name}
+        if color:
+            args["color"] = color if color.startswith("#") else f"#{color}"
+    elif action == "update":
+        if not label_id:
+            return "Ошибка: для действия 'update' необходимо указать параметр 'label_id' (ID метки)."
+        if not name and not color:
+            return "Ошибка: для действия 'update' необходимо указать хотя бы один изменяемый параметр ('name' или 'color')."
+        command = "labels/update"
+        args = {"label_id": label_id}
+        if name:
+            args["name"] = name
+        if color:
+            args["color"] = color if color.startswith("#") else f"#{color}"
+    elif action == "delete":
+        if not label_id:
+            return "Ошибка: для действия 'delete' необходимо указать параметр 'label_id' (ID метки)."
+        command = "labels/delete"
+        args = {"label_id": label_id}
+
+    logger.info(f"manage_labels: action={action!r}, label_id={label_id!r}, name={name!r}, color={color!r}")
+
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
+
+            await ws.send(json.dumps({
+                "command": command,
+                "message_id": msg_id,
+                "args": args
+            }))
+
+            async for message in ws:
+                data = json.loads(message)
+                if data.get("message_id") != msg_id:
+                    continue
+                if data.get("error_code"):
+                    return f"Ошибка команды labels ({action!r}): {data.get('details', data)}"
+
+                result = data.get("result", {})
+
+                if action == "list":
+                    labels = result if isinstance(result, list) else []
+                    if not labels:
+                        return "Каталог меток пуст (метки пока не созданы)."
+                    output = [f"### Каталог меток ESPHome ({len(labels)} шт.):\n"]
+                    for lbl in labels:
+                        lid = lbl.get("id", "N/A")
+                        lname = lbl.get("name", lid)
+                        lcolor = lbl.get("color", "")
+                        color_str = f" `{lcolor}`" if lcolor else ""
+                        output.append(f"- **{lname}**{color_str} — ID: `{lid}`")
+                    return "\n".join(output)
+
+                elif action == "create":
+                    lid = result.get("id", "N/A") if isinstance(result, dict) else "N/A"
+                    lname = result.get("name", name) if isinstance(result, dict) else name
+                    lcolor = result.get("color", color) if isinstance(result, dict) else color
+                    return f"✅ Метка `{lname}` ({lcolor}) успешно создана с ID: `{lid}`."
+
+                elif action == "update":
+                    lid = result.get("id", label_id) if isinstance(result, dict) else label_id
+                    lname = result.get("name", name) if isinstance(result, dict) else name
+                    lcolor = result.get("color", color) if isinstance(result, dict) else color
+                    return f"✅ Метка `{lid}` успешно обновлена: имя='{lname}', цвет='{lcolor}'."
+
+                elif action == "delete":
+                    return f"✅ Метка `{label_id}` успешно удалена из каталога и снята со всех устройств."
+
+    except Exception as e:
+        error_msg = f"Критическая ошибка manage_labels ({url}): {str(e)}"
+        logger.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def batch_manage_devices(
+    action: str = "archive",
+    configurations: list[str] | None = None,
+    label_ids: list[str] | None = None,
+    updates: list[dict] | None = None,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
+) -> str:
+    """
+    Инструмент 22 (P1): Пакетные операции над группой устройств (Bulk Operations).
+
+    Позволяет агенту массово удалять, архивировать или назначать метки сразу
+    на множество устройств за один атомарный запрос.
+
+    Параметр action поддерживает:
+      - "archive"    — массовая архивация списка устройств (devices/archive_bulk)
+      - "delete"     — массовое безвозвратное удаление списка устройств (devices/delete_bulk)
+      - "set_labels" — массовое назначение меток:
+                       либо единый список label_ids на все configurations,
+                       либо детальный список updates=[{"configuration": "...", "label_ids": [...]}, ...]
+
+    Параметры:
+      - configurations: список имен конфигураций (например ["dev1.yaml", "dev2.yaml"])
+      - label_ids:      список ID меток для применения ко всем указанным configurations
+      - updates:        детальная структура для индивидуального назначения меток
+      - host:           хост сервера ESPHome
+      - port:           сетевой порт WebSocket API ESPHome
+    """
+    url = get_ws_url(host, port)
+    msg_id = "bulk_tool_1"
+    action = action.strip().lower()
+
+    valid_actions = ("archive", "delete", "set_labels")
+    if action not in valid_actions:
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: archive, delete, set_labels."
+
+    if action in ("archive", "delete"):
+        if not configurations:
+            return f"Ошибка: для действия '{action}' необходимо передать список 'configurations'."
+        clean_configs = [resolve_configuration(c) for c in configurations]
+        command = f"devices/{action}_bulk"
+        args = {"configurations": clean_configs}
+
+    elif action == "set_labels":
+        if updates is not None:
+            clean_updates = []
+            for u in updates:
+                if isinstance(u, dict) and "configuration" in u:
+                    clean_updates.append({
+                        "configuration": resolve_configuration(u["configuration"]),
+                        "label_ids": u.get("label_ids", [])
+                    })
+            args = {"updates": clean_updates}
+        elif configurations:
+            lbls = label_ids or []
+            args = {
+                "updates": [
+                    {"configuration": resolve_configuration(c), "label_ids": lbls}
+                    for c in configurations
+                ]
+            }
+        else:
+            return "Ошибка: для действия 'set_labels' необходимо передать либо 'configurations' (и опционально 'label_ids'), либо детальный список 'updates'."
+        command = "devices/set_labels_bulk"
+
+    logger.info(f"batch_manage_devices: action={action!r}")
+
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
+
+            await ws.send(json.dumps({
+                "command": command,
+                "message_id": msg_id,
+                "args": args
+            }))
+
+            async for message in ws:
+                data = json.loads(message)
+                if data.get("message_id") != msg_id:
+                    continue
+                if data.get("error_code"):
+                    return f"Ошибка команды batch_manage_devices ({action!r}): {data.get('details', data)}"
+
+                result = data.get("result", [])
+                items = result if isinstance(result, list) else []
+
+                success_count = sum(1 for item in items if isinstance(item, dict) and item.get("success", False))
+                fail_count = len(items) - success_count
+
+                output = [f"### Результат пакетной операции `{action}` (всего: {len(items)}, успешно: {success_count}, ошибок: {fail_count}):\n"]
+                for item in items:
+                    if isinstance(item, dict):
+                        cfg = item.get("configuration", "N/A")
+                        ok = item.get("success", False)
+                        err = item.get("error", "")
+                        status_str = "✅ Успешно" if ok else f"❌ Ошибка ({err})"
+                        output.append(f"- `{cfg}`: {status_str}")
+                    else:
+                        output.append(f"- {item}")
+
+                return "\n".join(output)
+
+    except Exception as e:
+        error_msg = f"Критическая ошибка batch_manage_devices ({url}): {str(e)}"
+        logger.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
 async def authenticate_esphome(
     username: str = "",
     password: str = "",

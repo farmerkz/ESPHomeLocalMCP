@@ -32,7 +32,7 @@
 
 ---
 
-## 🛠 Доступные MCP Инструменты (20 инструментов)
+## 🛠 Доступные MCP Инструменты (22 инструмента)
 
 1. **Базовые операции (Compile & Flash):**
    - `validate_yaml(configuration, host, port)` — быстрая валидация YAML (`devices/validate`)
@@ -46,19 +46,21 @@
    - `decode_crash_backtrace(configuration, lines, host, port)` — расшифровка C++ дампов паники (`devices/decode_backtrace`)
    - `search_yaml_configs(query, context_lines, case_sensitive, host, port)` — поиск подстроки по всем YAML-конфигурациям (`yaml/search`)
 
-3. **Управление конфигурациями, платами и сборками (P1):**
+3. **Управление конфигурациями, секретами, метками, платами и сборками (P1):**
    - `manage_device_config(action, configuration, content, new_name, board_id, friendly_name, ssid, psk, config_only, overwrite, allow_wipe, host, port)` — CRUD операций с YAML, генерация по шаблону платы, secrets, офлайн/онлайн переименование (`devices/*`)
    - `migrate_device_config(configuration, content, apply, host, port)` — автоматическая миграция устаревшего YAML синтаксиса ESPHome (`editor/migrate_config`)
    - `search_components(action, query, category, platform, component_id, limit, offset, host, port)` — каталог и паспорта компонентов ESPHome (>940 записей), зависимости, шины, категории и режимы пинов (`components/*`)
    - `manage_secrets(action, key, value, ssid, psk, host, port)` — безопасное управление секретами (`secrets.yaml`), просмотр доступных ключей, запись секретов и настройка Wi-Fi (`config/*`)
+   - `manage_labels(action, label_id, name, color, host, port)` — управление глобальным каталогом меток (тегов) парка устройств (`labels/*`)
+   - `batch_manage_devices(action, configurations, label_ids, updates, host, port)` — пакетные операции: массовая архивация, массовое удаление и массовое назначение меток (`devices/*_bulk`)
    - `get_host_info(action, host, port)` — версии бэкенда/ESPHome Core и список обнаруженных физических USB-Serial адаптеров хоста (`config/*`)
    - `get_board_info(action, board_id, platform, variant, mcu, tag, query, limit, offset, host, port)` — информация о платах, поиск по чипам/тегам, пагинация и распиновка (`boards/*`)
    - `manage_build_jobs(action, configuration, job_id, status_filter, host, port)` — управление очередью сборки, кэшем, очистка истории задач (`clear`) и сброс отложенных обновлений (`clear_queued`) (`firmware/*`)
 
-4. **Пакетные операции, архивация, безопасность и версия (P2):**
+4. **Пакетные операции сборки, архивация, безопасность и версия (P2):**
    - `batch_compile_and_flash(configurations, action, port, force_local, bootloader, host, api_port)` — пакетная компиляция и прошивка (`firmware/*_bulk`)
    - `archive_devices(action, configuration, host, port)` — архивация и восстановление устройств (`devices/*_archived`)
-   - `manage_device_labels(configuration, label_ids, host, port)` — управление метками устройств (`devices/set_labels`)
+   - `manage_device_labels(configuration, label_ids, host, port)` — управление метками одного устройства (`devices/set_labels`)
    - `authenticate_esphome(username, password, token, host, port)` — аутентификация по паролю/токену (`auth/login`)
    - `get_server_version()` — получение информации о версии сервера и протоколе (SemVer)
 
