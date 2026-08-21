@@ -1025,6 +1025,201 @@ async def migrate_device_config(
 
 
 @mcp.tool()
+async def search_components(
+    action: str = "search",
+    query: str = "",
+    category: str = "",
+    platform: str = "",
+    component_id: str = "",
+    limit: int = 20,
+    offset: int = 0,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
+) -> str:
+    """
+    Инструмент 18 (P1): Поиск и исследование каталога компонентов ESPHome (>940 компонентов).
+
+    Позволяет агенту находить компоненты, датчики, дисплеи и приводы, узнавать их зависимости
+    (i2c, spi, uart), ограничения шин, ссылки на документацию и поддерживаемые режимы GPIO.
+
+    Параметр action поддерживает:
+      - "search"     — поиск компонентов по query, категории, платформе с пагинацией
+      - "get"        — подробная информация о конкретном компоненте (требует component_id или query)
+      - "categories" — список всех категорий компонентов ESPHome с количеством записей
+      - "pin_modes"  — справочник поддерживаемых режимов пинов для GPIO-расширителей
+
+    Параметры:
+      - query:        строка поиска (название, чип, например "bme280", "dht", "ssd1306")
+      - category:     фильтр по категории (например "sensor", "display", "light", "climate")
+      - platform:     фильтр по платформе чипа (например "esp32", "rp2040")
+      - component_id: точный ID компонента для action="get" (например "sensor.bme280_i2c")
+      - limit:        максимальное количество результатов (по умолчанию 20)
+      - offset:       смещение для пагинации (по умолчанию 0)
+      - host:         хост сервера ESPHome
+      - port:         сетевой порт WebSocket API ESPHome
+    """
+    url = get_ws_url(host, port)
+    msg_id = "comp_tool_1"
+    action = action.strip().lower()
+
+    valid_actions = ("search", "get", "categories", "pin_modes")
+    if action not in valid_actions:
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: {', '.join(valid_actions)}."
+
+    if action == "get" and not component_id and not query:
+        return "Ошибка: для действия 'get' необходимо указать параметр 'component_id' или 'query'."
+
+    if action == "search":
+        command = "components/get_components"
+        args: dict = {"limit": limit}
+        if offset > 0:
+            args["offset"] = offset
+        if query:
+            args["query"] = query
+        if category:
+            args["category"] = category
+        if platform:
+            args["platform"] = platform
+
+    elif action == "get":
+        target_q = component_id or query
+        command = "components/get_components"
+        args = {"query": target_q, "limit": 10}
+
+    elif action == "categories":
+        command = "components/get_categories"
+        args = {}
+
+    elif action == "pin_modes":
+        command = "components/get_pin_registry_modes"
+        args = {}
+
+    logger.info(f"search_components: action={action!r}, query={query!r}, category={category!r}, component_id={component_id!r}")
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
+
+            await ws.send(json.dumps({
+                "command": command,
+                "message_id": msg_id,
+                "args": args
+            }))
+
+            async for message in ws:
+                data = json.loads(message)
+                if data.get("message_id") != msg_id:
+                    continue
+                if data.get("error_code"):
+                    return f"Ошибка команды components ({action!r}): {data.get('details', data)}"
+
+                result = data.get("result", {})
+
+                if action == "search":
+                    comps = result.get("components", []) if isinstance(result, dict) else []
+                    total = result.get("total", len(comps)) if isinstance(result, dict) else len(comps)
+                    if not comps:
+                        return "Компоненты по заданным критериям не найдены."
+
+                    output = [f"### Каталог компонентов ESPHome (найдено: {total}, показано: {len(comps)}):\n"]
+                    for c in comps:
+                        cid = c.get("id", "N/A")
+                        cname = c.get("name", cid)
+                        cat = c.get("category", "")
+                        desc = c.get("description", "").strip()
+                        deps = ", ".join(c.get("dependencies", []))
+                        deps_str = f" | Зависимости: `{deps}`" if deps else ""
+                        docs = c.get("docs_url", "")
+                        docs_str = f" | [Документация]({docs})" if docs else ""
+                        output.append(f"- **{cname}** (`{cid}`) [{cat}]{deps_str}{docs_str}")
+                        if desc:
+                            short_desc = desc[:140] + ("..." if len(desc) > 140 else "")
+                            output.append(f"  *{short_desc}*")
+                    return "\n".join(output)
+
+                elif action == "get":
+                    target_q = component_id or query
+                    comps = result.get("components", []) if isinstance(result, dict) else []
+                    matched = None
+                    # Ищем точное совпадение по ID, либо первый результат
+                    for c in comps:
+                        if c.get("id") == target_q or c.get("id") == f"sensor.{target_q}" or c.get("name", "").lower() == target_q.lower():
+                            matched = c
+                            break
+                    if not matched and comps:
+                        matched = comps[0]
+
+                    if not matched:
+                        return f"Компонент `{target_q}` не найден в каталоге ESPHome."
+
+                    cid = matched.get("id", "N/A")
+                    cname = matched.get("name", cid)
+                    cat = matched.get("category", "?")
+                    desc = matched.get("description", "")
+                    docs = matched.get("docs_url", "")
+                    deps = matched.get("dependencies", []) or []
+                    bus_c = matched.get("bus_constraints", {}) or {}
+                    platforms = matched.get("supported_platforms", []) or []
+                    provides = matched.get("provides", []) or []
+                    multi_conf = matched.get("multi_conf", True)
+
+                    output = [f"### Компонент ESPHome: **{cname}** (`{cid}`)\n"]
+                    output.append(f"- **Категория:** `{cat}`")
+                    output.append(f"- **Несколько экземпляров (multi_conf):** {'Да' if multi_conf else 'Нет'}")
+                    if desc:
+                        output.append(f"- **Описание:** {desc}")
+                    if docs:
+                        output.append(f"- **Документация:** {docs}")
+                    if deps:
+                        output.append(f"- **Зависимости (подсистемы/шины):** {', '.join(f'`{d}`' for d in deps)}")
+                    if platforms:
+                        output.append(f"- **Поддерживаемые платформы:** {', '.join(f'`{p}`' for p in platforms)}")
+                    if provides:
+                        output.append(f"- **Предоставляет сущности:** {', '.join(f'`{pr}`' for pr in provides)}")
+
+                    if bus_c:
+                        output.append("\n**Ограничения шин связи (bus constraints):**")
+                        for bus_name, constraints in bus_c.items():
+                            c_items = []
+                            if isinstance(constraints, dict):
+                                for k, v in constraints.items():
+                                    c_items.append(f"{k}={v}")
+                            c_str = f" ({', '.join(c_items)})" if c_items else ""
+                            output.append(f"  - `{bus_name}`{c_str}")
+
+                    return "\n".join(output)
+
+                elif action == "categories":
+                    cats = result if isinstance(result, list) else []
+                    if not cats:
+                        return "Категории компонентов не найдены."
+                    output = [f"### Категории компонентов ESPHome ({len(cats)} шт.):\n"]
+                    for cat in cats:
+                        cat_id = cat.get("id", "?")
+                        cat_name = cat.get("name", cat_id)
+                        count = cat.get("count", 0)
+                        output.append(f"- `{cat_id}` — **{cat_name}** ({count} компонентов)")
+                    return "\n".join(output)
+
+                elif action == "pin_modes":
+                    pins_dict = result if isinstance(result, dict) else {}
+                    if not pins_dict:
+                        return "Справочник режимов пинов пуст."
+                    output = [f"### Справочник режимов пинов для GPIO-расширителей ({len(pins_dict)} микросхем):\n"]
+                    for chip, modes in pins_dict.items():
+                        modes_str = ", ".join(f"`{m}`" for m in modes) if isinstance(modes, list) else str(modes)
+                        output.append(f"- **{chip}**: {modes_str}")
+                    return "\n".join(output)
+
+    except Exception as e:
+        error_msg = f"Критическая ошибка search_components ({url}): {str(e)}"
+        logger.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
 async def get_board_info(
     action: str = "list",
     board_id: str = "",

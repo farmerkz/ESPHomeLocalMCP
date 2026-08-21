@@ -19,6 +19,7 @@ from server import (
     manage_device_config,
     manage_build_jobs,
     migrate_device_config,
+    search_components,
     compile_firmware,
     flash_ota,
     get_server_version
@@ -150,6 +151,22 @@ class TestMCPServerUnit(unittest.TestCase):
         self.assertIn("apply", sig_mig.parameters)
         self.assertFalse(sig_mig.parameters["apply"].default)
 
+        sig_comp = inspect.signature(search_components)
+        self.assertIn("action", sig_comp.parameters)
+        self.assertEqual(sig_comp.parameters["action"].default, "search")
+        self.assertIn("query", sig_comp.parameters)
+        self.assertEqual(sig_comp.parameters["query"].default, "")
+        self.assertIn("category", sig_comp.parameters)
+        self.assertEqual(sig_comp.parameters["category"].default, "")
+        self.assertIn("platform", sig_comp.parameters)
+        self.assertEqual(sig_comp.parameters["platform"].default, "")
+        self.assertIn("component_id", sig_comp.parameters)
+        self.assertEqual(sig_comp.parameters["component_id"].default, "")
+        self.assertIn("limit", sig_comp.parameters)
+        self.assertEqual(sig_comp.parameters["limit"].default, 20)
+        self.assertIn("offset", sig_comp.parameters)
+        self.assertEqual(sig_comp.parameters["offset"].default, 0)
+
     def test_manage_device_config_validation(self):
         """Проверка локальной валидации аргументов в manage_device_config."""
         loop = asyncio.new_event_loop()
@@ -205,6 +222,20 @@ class TestMCPServerUnit(unittest.TestCase):
             # Вызов без configuration и content
             res_no_args = loop.run_until_complete(migrate_device_config())
             self.assertIn("необходимо указать либо параметр 'configuration'", res_no_args)
+        finally:
+            loop.close()
+
+    def test_search_components_validation(self):
+        """Проверка локальной валидации аргументов в search_components."""
+        loop = asyncio.new_event_loop()
+        try:
+            # 1. Неизвестное действие
+            res_unknown = loop.run_until_complete(search_components(action="unknown_action"))
+            self.assertIn("неизвестное действие", res_unknown)
+
+            # 2. Get без component_id и query
+            res_no_id = loop.run_until_complete(search_components(action="get"))
+            self.assertIn("необходимо указать параметр 'component_id' или 'query'", res_no_id)
         finally:
             loop.close()
 
@@ -483,6 +514,45 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
             print(f"  - Teardown: удаление временного файла `{cfg_file}`...")
             await manage_device_config(action="delete", configuration=cfg_file)
             print("  ✅ Teardown завершен.")
+
+    async def test_search_components_search_and_get(self):
+        """Тестирование поиска и детальной спецификации компонентов ESPHome."""
+        print("\n🔍 Запуск тестов search_components (search & get)...")
+
+        # 1. Поиск по query="bme280"
+        search_res = await search_components(action="search", query="bme280")
+        self.assertIn("Каталог компонентов ESPHome", search_res)
+        self.assertIn("bme280", search_res.lower())
+        print(f"  - search_components (query='bme280'): {search_res[:100]}...")
+
+        # 2. Поиск по category="display" с пагинацией
+        disp_res = await search_components(action="search", category="display", limit=3, offset=3)
+        self.assertIn("Каталог компонентов ESPHome", disp_res)
+        print(f"  - search_components (category='display', limit=3, offset=3): пагинация работает")
+
+        # 3. Детальный технический паспорт компонента (action="get")
+        get_res = await search_components(action="get", component_id="sensor.bme280_i2c")
+        self.assertIn("Компонент ESPHome", get_res)
+        self.assertIn("Категория", get_res)
+        self.assertIn("i2c", get_res.lower())
+        print(f"  - search_components (get 'sensor.bme280_i2c'): {get_res[:120]}...")
+
+    async def test_search_components_categories_and_pin_modes(self):
+        """Тестирование справочника категорий и режимов пинов GPIO-расширителей."""
+        print("\n📚 Запуск тестов search_components (categories & pin_modes)...")
+
+        # 1. Список категорий компонентов
+        cats_res = await search_components(action="categories")
+        self.assertIn("Категории компонентов ESPHome", cats_res)
+        self.assertIn("sensor", cats_res.lower())
+        self.assertIn("display", cats_res.lower())
+        print(f"  - search_components (action='categories'): {cats_res[:100]}...")
+
+        # 2. Справочник режимов пинов
+        pins_res = await search_components(action="pin_modes")
+        self.assertIn("Справочник режимов пинов", pins_res)
+        self.assertTrue("pcf8574" in pins_res.lower() or "mcp23xxx" in pins_res.lower() or "input" in pins_res.lower())
+        print(f"  - search_components (action='pin_modes'): {pins_res[:100]}...")
 
 
 if __name__ == "__main__":
