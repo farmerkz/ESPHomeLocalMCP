@@ -32,7 +32,7 @@
 
 ---
 
-## 🛠 Доступные MCP Инструменты (18 инструментов)
+## 🛠 Доступные MCP Инструменты (20 инструментов)
 
 1. **Базовые операции (Compile & Flash):**
    - `validate_yaml(configuration, host, port)` — быстрая валидация YAML (`devices/validate`)
@@ -50,6 +50,8 @@
    - `manage_device_config(action, configuration, content, new_name, board_id, friendly_name, ssid, psk, config_only, overwrite, allow_wipe, host, port)` — CRUD операций с YAML, генерация по шаблону платы, secrets, офлайн/онлайн переименование (`devices/*`)
    - `migrate_device_config(configuration, content, apply, host, port)` — автоматическая миграция устаревшего YAML синтаксиса ESPHome (`editor/migrate_config`)
    - `search_components(action, query, category, platform, component_id, limit, offset, host, port)` — каталог и паспорта компонентов ESPHome (>940 записей), зависимости, шины, категории и режимы пинов (`components/*`)
+   - `manage_secrets(action, key, value, ssid, psk, host, port)` — безопасное управление секретами (`secrets.yaml`), просмотр доступных ключей, запись секретов и настройка Wi-Fi (`config/*`)
+   - `get_host_info(action, host, port)` — версии бэкенда/ESPHome Core и список обнаруженных физических USB-Serial адаптеров хоста (`config/*`)
    - `get_board_info(action, board_id, platform, variant, mcu, tag, query, limit, offset, host, port)` — информация о платах, поиск по чипам/тегам, пагинация и распиновка (`boards/*`)
    - `manage_build_jobs(action, configuration, job_id, status_filter, host, port)` — управление очередью сборки, кэшем, очистка истории задач (`clear`) и сброс отложенных обновлений (`clear_queued`) (`firmware/*`)
 

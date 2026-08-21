@@ -1220,6 +1220,209 @@ async def search_components(
 
 
 @mcp.tool()
+async def manage_secrets(
+    action: str = "list",
+    key: str = "",
+    value: str = "",
+    ssid: str = "",
+    psk: str = "",
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
+) -> str:
+    """
+    Инструмент 19 (P1): Безопасное управление секретами и реквизитами Wi-Fi (secrets.yaml).
+
+    Позволяет агенту просматривать список существующих ключей секретов (без раскрытия
+    приватных значений), атомарно добавлять/обновлять секреты и настраивать Wi-Fi реквизиты.
+
+    Параметр action поддерживает:
+      - "list"     — просмотр списка ключей существующих секретов (значения скрыты)
+      - "set"      — запись/обновление секрета по ключу (key) и значению (value)
+      - "set_wifi" — быстрая настройка общих реквизитов Wi-Fi (ssid, psk)
+
+    Политика безопасности:
+      - Значения секретов (пароли, токены) НИКОГДА не возвращаются в ответах инструмента
+        и не выводятся в логи MCP-сервера.
+      - В логах параметры маскируются: value='***', psk='***'.
+
+    Параметры:
+      - key:   имя ключа секрета (для action="set", например "mqtt_broker_password")
+      - value: значение секрета (для action="set")
+      - ssid:  имя сети Wi-Fi (для action="set_wifi")
+      - psk:   пароль сети Wi-Fi (для action="set_wifi")
+      - host:  хост сервера ESPHome
+      - port:  сетевой порт WebSocket API ESPHome
+    """
+    url = get_ws_url(host, port)
+    msg_id = "secrets_tool_1"
+    action = action.strip().lower()
+
+    valid_actions = ("list", "get", "set", "set_wifi")
+    if action not in valid_actions:
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: list, set, set_wifi."
+
+    if action in ("list", "get"):
+        command = "config/get_secrets"
+        args = {}
+    elif action == "set":
+        if not key or not value:
+            return "Ошибка: для действия 'set' необходимо указать оба параметра: 'key' (имя ключа) и 'value' (значение)."
+        command = "config/set_secret"
+        args = {"key": key, "value": value}
+    elif action == "set_wifi":
+        if not ssid:
+            return "Ошибка: для действия 'set_wifi' необходимо указать параметр 'ssid' (имя сети Wi-Fi)."
+        command = "config/set_wifi_credentials"
+        args = {"ssid": ssid, "psk": psk}
+
+    # Безопасное логирование без раскрытия паролей/токенов
+    log_value = "***" if value else ""
+    log_psk = "***" if psk else ""
+    logger.info(f"manage_secrets: action={action!r}, key={key!r}, value={log_value!r}, ssid={ssid!r}, psk={log_psk!r}")
+
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
+
+            await ws.send(json.dumps({
+                "command": command,
+                "message_id": msg_id,
+                "args": args
+            }))
+
+            async for message in ws:
+                data = json.loads(message)
+                if data.get("message_id") != msg_id:
+                    continue
+                if data.get("error_code"):
+                    return f"Ошибка команды secrets ({action!r}): {data.get('details', data)}"
+
+                result = data.get("result", {})
+
+                if action in ("list", "get"):
+                    keys = result if isinstance(result, list) else []
+                    if not keys:
+                        return "Файл secrets.yaml пуст или секреты не зарегистрированы."
+                    output = [f"### Зарегистрированные ключи секретов ESPHome ({len(keys)} шт.):\n"]
+                    output.append("*(В целях безопасности приватные значения секретов не отображаются)*\n")
+                    for k in sorted(keys):
+                        output.append(f"- `{k}`")
+                    output.append(f"\n💡 *Использование в YAML:* `!secret <key_name>`")
+                    return "\n".join(output)
+
+                elif action == "set":
+                    created = result.get("created", False) if isinstance(result, dict) else False
+                    status_text = "создан" if created else "обновлен"
+                    return f"✅ Секрет `{key}` успешно {status_text} в `secrets.yaml` (значение скрыто в целях безопасности)."
+
+                elif action == "set_wifi":
+                    return f"✅ Реквизиты сети Wi-Fi (`ssid`: `{ssid}`) успешно записаны в `secrets.yaml` (ключи `wifi_ssid` и `wifi_password`, пароль скрыт)."
+
+    except Exception as e:
+        error_msg = f"Критическая ошибка manage_secrets ({url}): {str(e)}"
+        logger.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def get_host_info(
+    action: str = "version",
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
+) -> str:
+    """
+    Инструмент 20 (P1): Информация о хосте ESPHome, версиях и подключенных USB-Serial портах.
+
+    Параметр action поддерживает:
+      - "version"      — получение версии бэкенда Device Builder и ESPHome Core
+      - "serial_ports" — список обнаруженных физических USB-Serial адаптеров на хосте
+      - "all"          — полная сводка (версии + список Serial-портов)
+
+    Параметры:
+      - host: хост сервера ESPHome
+      - port: сетевой порт WebSocket API ESPHome
+    """
+    url = get_ws_url(host, port)
+    action = action.strip().lower()
+
+    valid_actions = ("version", "serial_ports", "ports", "all")
+    if action not in valid_actions:
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: version, serial_ports, all."
+
+    logger.info(f"get_host_info: action={action!r}")
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
+
+            ver_data = {}
+            ports_data = []
+
+            # Запрашиваем version при необходимости
+            if action in ("version", "all"):
+                v_id = "host_ver_1"
+                await ws.send(json.dumps({
+                    "command": "config/version",
+                    "message_id": v_id,
+                    "args": {}
+                }))
+                async for msg in ws:
+                    d = json.loads(msg)
+                    if d.get("message_id") == v_id:
+                        ver_data = d.get("result", {})
+                        break
+
+            # Запрашиваем serial_ports при необходимости
+            if action in ("serial_ports", "ports", "all"):
+                p_id = "host_ports_1"
+                await ws.send(json.dumps({
+                    "command": "config/serial_ports",
+                    "message_id": p_id,
+                    "args": {}
+                }))
+                async for msg in ws:
+                    d = json.loads(msg)
+                    if d.get("message_id") == p_id:
+                        ports_data = d.get("result", [])
+                        break
+
+            output = []
+            if action in ("version", "all"):
+                srv_ver = ver_data.get("server_version", "N/A")
+                core_ver = ver_data.get("esphome_version", "N/A")
+                output.append("### Информация о сервере ESPHome:\n")
+                output.append(f"- **ESPHome Core Version:** `{core_ver}`")
+                output.append(f"- **Device Builder Backend:** `{srv_ver}`")
+
+            if action in ("serial_ports", "ports", "all"):
+                if output:
+                    output.append("\n---\n")
+                output.append(f"### Подключенные USB-Serial порты хоста ({len(ports_data)} шт.):\n")
+                if not ports_data:
+                    output.append("Физические USB-Serial адаптеры не обнаружены на хосте.")
+                else:
+                    for p in ports_data:
+                        port_name = p.get("port", "N/A")
+                        desc = p.get("description", "")
+                        hwid = p.get("hwid", "")
+                        output.append(f"- **`{port_name}`**: {desc}")
+                        if hwid:
+                            output.append(f"  *HWID:* `{hwid}`")
+
+            return "\n".join(output)
+
+    except Exception as e:
+        error_msg = f"Критическая ошибка get_host_info ({url}): {str(e)}"
+        logger.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
 async def get_board_info(
     action: str = "list",
     board_id: str = "",

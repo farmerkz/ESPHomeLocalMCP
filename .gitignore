@@ -1,22 +1,84 @@
-# Игнорировать все скрытые файлы и папки
-.*
+# ====================================================================
+# ESPHome Local MCP Server — .gitignore
+# ====================================================================
 
-# Не игнорировать .git и .gitignore
+# --- Скрытые файлы (Default deny с белым списком) ---
+.*
 !.git
 !.gitignore
 !.agents
+!.agents/**
 !.env.example
 
-# Локальные конфигурации
+# --- Секреты и конфиденциальные данные (Безопасность) ---
 .env
+.env.*
+!.env.example
+secrets.yaml
+*.secret.yaml
+*.secrets.yaml
 
-# Виртуальное окружение Python
+# --- Python & Окружение ---
 .venv/
+venv/
+ENV/
+env/
 __pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
 
-# Временные тестовые файлы и каталоги
+# --- Сборка и дистрибуция Python ---
+dist/
+build/
+*.egg-info/
+*.egg
+
+# --- Тестирование, покрытие и кэш линтеров ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+
+# --- Логи и дампы ---
+*.log
+*.log.*
+*.out
+
+# --- Временные файлы и артефакты тестов ---
+tmp/
 tmp_*
 test_tmp_*
+scratch/
 scratch_*
 *.tmp
+mcp_test_*
+mcp-fix-*
+mcp-mig-*
+mcp-rn-*
+
+# --- Кэш компиляции ESPHome & PlatformIO ---
+.esphome/
+.platformio/
+.pio/
+
+# --- Системные файлы macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# --- IDE и редакторы ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 

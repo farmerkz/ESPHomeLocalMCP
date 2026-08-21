@@ -20,6 +20,8 @@ from server import (
     manage_build_jobs,
     migrate_device_config,
     search_components,
+    manage_secrets,
+    get_host_info,
     compile_firmware,
     flash_ota,
     get_server_version
@@ -167,6 +169,22 @@ class TestMCPServerUnit(unittest.TestCase):
         self.assertIn("offset", sig_comp.parameters)
         self.assertEqual(sig_comp.parameters["offset"].default, 0)
 
+        sig_sec = inspect.signature(manage_secrets)
+        self.assertIn("action", sig_sec.parameters)
+        self.assertEqual(sig_sec.parameters["action"].default, "list")
+        self.assertIn("key", sig_sec.parameters)
+        self.assertEqual(sig_sec.parameters["key"].default, "")
+        self.assertIn("value", sig_sec.parameters)
+        self.assertEqual(sig_sec.parameters["value"].default, "")
+        self.assertIn("ssid", sig_sec.parameters)
+        self.assertEqual(sig_sec.parameters["ssid"].default, "")
+        self.assertIn("psk", sig_sec.parameters)
+        self.assertEqual(sig_sec.parameters["psk"].default, "")
+
+        sig_host = inspect.signature(get_host_info)
+        self.assertIn("action", sig_host.parameters)
+        self.assertEqual(sig_host.parameters["action"].default, "version")
+
     def test_manage_device_config_validation(self):
         """Проверка локальной валидации аргументов в manage_device_config."""
         loop = asyncio.new_event_loop()
@@ -236,6 +254,33 @@ class TestMCPServerUnit(unittest.TestCase):
             # 2. Get без component_id и query
             res_no_id = loop.run_until_complete(search_components(action="get"))
             self.assertIn("необходимо указать параметр 'component_id' или 'query'", res_no_id)
+        finally:
+            loop.close()
+
+    def test_manage_secrets_validation(self):
+        """Проверка локальной валидации аргументов в manage_secrets."""
+        loop = asyncio.new_event_loop()
+        try:
+            # 1. Неизвестное действие
+            res_unknown = loop.run_until_complete(manage_secrets(action="unknown_action"))
+            self.assertIn("неизвестное действие", res_unknown)
+
+            # 2. Set без key или без value
+            res_no_key = loop.run_until_complete(manage_secrets(action="set", value="abc"))
+            self.assertIn("необходимо указать оба параметра", res_no_key)
+
+            # 3. Set_wifi без ssid
+            res_no_ssid = loop.run_until_complete(manage_secrets(action="set_wifi"))
+            self.assertIn("необходимо указать параметр 'ssid'", res_no_ssid)
+        finally:
+            loop.close()
+
+    def test_get_host_info_validation(self):
+        """Проверка локальной валидации аргументов в get_host_info."""
+        loop = asyncio.new_event_loop()
+        try:
+            res_unknown = loop.run_until_complete(get_host_info(action="unknown_action"))
+            self.assertIn("неизвестное действие", res_unknown)
         finally:
             loop.close()
 
@@ -553,6 +598,86 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Справочник режимов пинов", pins_res)
         self.assertTrue("pcf8574" in pins_res.lower() or "mcp23xxx" in pins_res.lower() or "input" in pins_res.lower())
         print(f"  - search_components (action='pin_modes'): {pins_res[:100]}...")
+
+    async def test_manage_secrets_list_and_privacy(self):
+        """Тестирование чтения списка секретов с обеспечением приватности значений."""
+        print("\n🔒 Запуск теста manage_secrets (list & privacy)...")
+        res_list = await manage_secrets(action="list")
+        self.assertIn("Зарегистрированные ключи секретов ESPHome", res_list)
+        self.assertIn("приватные значения секретов не отображаются", res_list)
+        print(f"  - manage_secrets (action='list'): успешно получены ключи без раскрытия значений")
+
+    async def test_manage_secrets_lifecycle_with_snapshot_guard(self):
+        """
+        Тестирование записи секрета с гарантированным Teardown Guard.
+        Сохраняет исходный снимок secrets.yaml и восстанавливает его байт-в-байт после завершения.
+        """
+        print("\n🛡 Запуск теста жизненного цикла manage_secrets с Teardown Guard...")
+
+        secrets_path_candidates = [
+            "/Users/andreyzolotnitskiy/Documents/github/esphome/config/secrets.yaml",
+            os.path.expanduser("~/Documents/github/esphome/config/secrets.yaml"),
+        ]
+        target_secrets_path = None
+        original_snapshot = None
+
+        for cand in secrets_path_candidates:
+            if os.path.exists(cand):
+                target_secrets_path = cand
+                with open(cand, "r", encoding="utf-8") as f:
+                    original_snapshot = f.read()
+                break
+
+        uid = uuid.uuid4().hex[:6]
+        temp_key = f"mcp_test_key_{uid}"
+        temp_value = f"probe_val_{uid}"
+
+        try:
+            # 1. Запись временного секрета
+            set_res = await manage_secrets(action="set", key=temp_key, value=temp_value)
+            self.assertIn(f"Секрет `{temp_key}` успешно", set_res)
+            self.assertIn("значение скрыто в целях безопасности", set_res)
+            self.assertNotIn(temp_value, set_res)
+            print(f"  - manage_secrets (action='set', key='{temp_key}'): успешно записан")
+
+            # 2. Проверка появления ключа в списке
+            list_res = await manage_secrets(action="list")
+            self.assertIn(f"`{temp_key}`", list_res)
+            print(f"  - manage_secrets (action='list'): временный ключ обнаружен в каталоге")
+
+        finally:
+            # 3. Teardown Guard: гарантированное восстановление secrets.yaml
+            if target_secrets_path and original_snapshot is not None:
+                print(f"  - Teardown Guard: восстановление `{target_secrets_path}` до исходного снимка...")
+                with open(target_secrets_path, "w", encoding="utf-8") as f:
+                    f.write(original_snapshot)
+                print("  ✅ secrets.yaml успешно восстановлен в исходное состояние.")
+
+            # Проверяем, что временный ключ исчез
+            final_list = await manage_secrets(action="list")
+            self.assertNotIn(f"`{temp_key}`", final_list)
+
+    async def test_get_host_info_version_and_ports(self):
+        """Тестирование получения версий сервера и Serial-портов."""
+        print("\n🖥 Запуск тестов get_host_info (version & serial_ports)...")
+
+        # 1. Version
+        ver_res = await get_host_info(action="version")
+        self.assertIn("Информация о сервере ESPHome", ver_res)
+        self.assertIn("ESPHome Core Version", ver_res)
+        self.assertIn("Device Builder Backend", ver_res)
+        print(f"  - get_host_info (action='version'): {ver_res[:100]}...")
+
+        # 2. Serial ports
+        ports_res = await get_host_info(action="serial_ports")
+        self.assertIn("Подключенные USB-Serial порты хоста", ports_res)
+        print(f"  - get_host_info (action='serial_ports'): {ports_res[:100]}...")
+
+        # 3. All
+        all_res = await get_host_info(action="all")
+        self.assertIn("Информация о сервере ESPHome", all_res)
+        self.assertIn("Подключенные USB-Serial порты хоста", all_res)
+        print(f"  - get_host_info (action='all'): успешно получена сводная информация")
 
 
 if __name__ == "__main__":
