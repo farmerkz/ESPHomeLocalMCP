@@ -306,43 +306,82 @@ async def validate_yaml(configuration: str, host: str = DEFAULT_HOST, port: int 
                                     {"configuration": config_name}, port=port)
 
 @mcp.tool()
-async def compile_firmware(configuration: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
+async def compile_firmware(
+    configuration: str,
+    force_local: bool = False,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
+) -> str:
     """
     Инструмент 2: Только компиляция прошивки без загрузки.
     
-    Параметр configuration принимает:
-      - имя файла: "mcp-test.yaml"
-      - относительный путь с префиксом: "config/mcp-test.yaml"
+    Параметры:
+      - configuration: имя файла ("mcp-test.yaml") или относительный путь ("config/mcp-test.yaml")
+      - force_local: если True, принудительная локальная сборка без использования кэша/кластера сборки
+      - host: хост сервера ESPHome (по умолчанию из .env или localhost)
+      - port: сетевой порт WebSocket API ESPHome (по умолчанию из .env или 6052)
     """
     config_name = resolve_configuration(configuration)
-    return await execute_ws_command(host, "firmware/compile",
-                                    {"configuration": config_name}, port=port)
+    args: dict = {"configuration": config_name}
+    if force_local:
+        args["force_local"] = True
+    return await execute_ws_command(host, "firmware/compile", args, port=port)
 
 @mcp.tool()
-async def flash_ota(configuration: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
+async def flash_ota(
+    configuration: str,
+    port: str = "OTA",
+    bootloader: bool = False,
+    host: str = DEFAULT_HOST,
+    api_port: int = DEFAULT_PORT
+) -> str:
     """
-    Инструмент 3: Только OTA-прошивка готового бинарника.
+    Инструмент 3: Прошивка готового скомпилированного бинарника (OTA / Serial / IP).
     
-    Параметр configuration принимает:
-      - имя файла: "mcp-test.yaml"
-      - относительный путь с префиксом: "config/mcp-test.yaml"
+    Параметры:
+      - configuration: имя файла ("mcp-test.yaml") или относительный путь ("config/mcp-test.yaml")
+      - port: целевой порт/адрес прошивки устройства. По умолчанию "OTA" (по воздуху).
+              Также поддерживается явный IP-адрес/hostname ("192.168.1.105") или serial-порт ("/dev/ttyUSB0", "COM3")
+      - bootloader: если True, прошивает также образ bootloader
+      - host: хост сервера ESPHome (по умолчанию из .env или localhost)
+      - api_port: сетевой порт WebSocket API ESPHome (по умолчанию из .env или 6052)
     """
     config_name = resolve_configuration(configuration)
-    return await execute_ws_command(host, "firmware/upload",
-                                    {"configuration": config_name, "port": "OTA"}, port=port)
+    target_port = "OTA" if not port else str(port)
+    args: dict = {"configuration": config_name, "port": target_port}
+    if bootloader:
+        args["bootloader"] = True
+    return await execute_ws_command(host, "firmware/upload", args, port=api_port)
 
 @mcp.tool()
-async def compile_and_flash(configuration: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
+async def compile_and_flash(
+    configuration: str,
+    port: str = "OTA",
+    force_local: bool = False,
+    bootloader: bool = False,
+    host: str = DEFAULT_HOST,
+    api_port: int = DEFAULT_PORT
+) -> str:
     """
-    Инструмент 4: Полный цикл (Компиляция + OTA-Прошивка).
+    Инструмент 4: Полный цикл сборки и прошивки (Компиляция + Загрузка по OTA / Serial / IP).
     
-    Параметр configuration принимает:
-      - имя файла: "mcp-test.yaml"
-      - относительный путь с префиксом: "config/mcp-test.yaml"
+    Параметры:
+      - configuration: имя файла ("mcp-test.yaml") или относительный путь ("config/mcp-test.yaml")
+      - port: целевой порт/адрес прошивки устройства. По умолчанию "OTA" (по воздуху).
+              Также поддерживается явный IP-адрес/hostname ("192.168.1.105") или serial-порт ("/dev/ttyUSB0", "COM3")
+      - force_local: если True, принудительная локальная компиляция без кэша
+      - bootloader: если True, прошивает также загрузчик (bootloader)
+      - host: хост сервера ESPHome (по умолчанию из .env или localhost)
+      - api_port: сетевой порт WebSocket API ESPHome (по умолчанию из .env или 6052)
     """
     config_name = resolve_configuration(configuration)
-    return await execute_ws_command(host, "firmware/install",
-                                    {"configuration": config_name, "port": "OTA"}, port=port)
+    target_port = "OTA" if not port else str(port)
+    args: dict = {"configuration": config_name, "port": target_port}
+    if force_local:
+        args["force_local"] = True
+    if bootloader:
+        args["bootloader"] = True
+    return await execute_ws_command(host, "firmware/install", args, port=api_port)
 
 # ==========================================
 # ФАЗА P0: ИНСТРУМЕНТЫ МОНИТОРИНГА И ОТЛАДКИ
@@ -652,6 +691,12 @@ async def manage_device_config(
     configuration: str,
     content: str = "",
     new_name: str = "",
+    board_id: str = "",
+    friendly_name: str = "",
+    ssid: str = "",
+    psk: str = "",
+    config_only: bool = True,
+    overwrite: bool = True,
     allow_wipe: bool = False,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT
@@ -662,11 +707,27 @@ async def manage_device_config(
     Параметр action поддерживает следующие действия:
       - "get"    — прочитать содержимое YAML-конфигурации устройства
       - "update" — записать новое содержимое YAML-конфигурации (требует content)
-      - "create" — создать новую конфигурацию устройства (требует content)
-      - "rename" — переименовать конфигурацию (требует new_name; config_only=True — без прошивки)
+      - "create" — создать новую конфигурацию устройства:
+                   - по готовому YAML (параметр content)
+                   - или по шаблону платы (параметр board_id, опционально friendly_name, ssid, psk)
+      - "rename" — переименовать конфигурацию (требует new_name):
+                   - config_only=True (по умолчанию) — офлайн переименование файлов на диске
+                   - config_only=False — онлайн двухшаговый процесс (сборка -> OTA-прошивка -> переименование)
       - "delete" — удалить конфигурацию и связанные файлы
 
-    Параметр configuration — имя файла, например "test.yaml".
+    Параметры:
+      - configuration: имя файла ("test.yaml") или относительный путь ("config/test.yaml")
+      - content: содержимое YAML для действий "update" или "create"
+      - new_name: новое имя для действия "rename"
+      - board_id: ID платы для создания по шаблону (например "esp32dev", "d1_mini", "nodemcuv2")
+      - friendly_name: понятное имя устройства (например "Датчик климата")
+      - ssid: имя Wi-Fi сети (сохраняется в secrets.yaml с использованием !secret)
+      - psk: пароль Wi-Fi сети
+      - config_only: переименование только файлов конфигурации (True) или с онлайн OTA-прошивкой (False)
+      - overwrite: перезаписывать ли существующий файл при создании
+      - allow_wipe: разрешить перезапись при действии "update"
+      - host: хост сервера ESPHome
+      - port: сетевой порт WebSocket API ESPHome
     """
     url = get_ws_url(host, port)
     msg_id = "manage_cfg_1"
@@ -684,28 +745,46 @@ async def manage_device_config(
         return f"Ошибка: неизвестное действие '{action}'. Допустимые: get, update, create, rename, delete."
 
     command = command_map[action]
+    config_name = resolve_configuration(configuration)
 
     # Формируем аргументы по действию
     if action == "get":
-        args = {"configuration": configuration}
+        args = {"configuration": config_name}
     elif action == "update":
         if not content:
             return "Ошибка: для действия 'update' необходимо указать параметр content."
-        args = {"configuration": configuration, "content": content, "allow_wipe": allow_wipe}
+        args = {"configuration": config_name, "content": content, "allow_wipe": allow_wipe}
     elif action == "create":
-        if not content:
-            return "Ошибка: для действия 'create' необходимо указать параметр content."
-        # Убираем расширение .yaml из имени, т.к. devices/create принимает имя без расширения
-        name = configuration.removesuffix(".yaml")
-        args = {"name": name, "file_content": content, "overwrite": True}
+        name = config_name.removesuffix(".yaml")
+        args = {"name": name, "overwrite": overwrite}
+        if content:
+            args["file_content"] = content
+        elif board_id:
+            args["board_id"] = board_id
+            if friendly_name:
+                args["friendly_name"] = friendly_name
+            if ssid:
+                args["ssid"] = ssid
+            if psk:
+                args["psk"] = psk
+        else:
+            return (
+                "Ошибка: для действия 'create' необходимо указать либо параметр content "
+                "(содержимое YAML), либо board_id (ID платы для генерации из шаблона)."
+            )
     elif action == "rename":
         if not new_name:
             return "Ошибка: для действия 'rename' необходимо указать параметр new_name."
-        args = {"configuration": configuration, "new_name": new_name.removesuffix(".yaml"), "config_only": True}
+        new_name_clean = resolve_configuration(new_name).removesuffix(".yaml")
+        args = {
+            "configuration": config_name,
+            "new_name": new_name_clean,
+            "config_only": config_only
+        }
     elif action == "delete":
-        args = {"configuration": configuration}
+        args = {"configuration": config_name}
 
-    logger.info(f"manage_device_config: action={action!r}, configuration={configuration!r}")
+    logger.info(f"manage_device_config: action={action!r}, configuration={config_name!r}")
     try:
         async with websockets.connect(url, ping_interval=None) as ws:
             first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
@@ -730,22 +809,59 @@ async def manage_device_config(
 
                 if action == "get":
                     if not result:
-                        return f"Файл {configuration!r} пустой или не найден."
-                    return f"### Содержимое конфигурации `{configuration}`:\n\n```yaml\n{result}\n```"
+                        return f"Файл {config_name!r} пустой или не найден."
+                    return f"### Содержимое конфигурации `{config_name}`:\n\n```yaml\n{result}\n```"
 
                 elif action == "update":
-                    return f"✅ Конфигурация `{configuration}` успешно обновлена."
+                    return f"✅ Конфигурация `{config_name}` успешно обновлена."
 
                 elif action == "create":
                     real_name = (result or {}).get("configuration", f"{args['name']}.yaml")
                     return f"✅ Конфигурация создана: `{real_name}`"
 
                 elif action == "rename":
-                    new_cfg = (result or {}).get("configuration", "N/A")
-                    return f"✅ Конфигурация переименована: `{configuration}` → `{new_cfg}`"
+                    # Проверяем, запущена ли двухшаговая задача прошивки (при config_only=False)
+                    job_id = (result or {}).get("job_id") if isinstance(result, dict) else None
+                    if job_id and not config_only:
+                        logger.info(f"Онлайн-переименование запустило задачу {job_id}, подписываемся на логи...")
+                        follow_id = "rename_follow_2"
+                        await ws.send(json.dumps({
+                            "command": "firmware/follow_job",
+                            "message_id": follow_id,
+                            "args": {"job_id": job_id}
+                        }))
+
+                        output_log = []
+                        async for follow_msg in ws:
+                            f_data = json.loads(follow_msg)
+                            if f_data.get("message_id") != follow_id:
+                                continue
+                            f_event = f_data.get("event")
+                            if f_event == "output":
+                                line_data = f_data.get("data", "")
+                                if isinstance(line_data, dict):
+                                    line = line_data.get("line", "").strip()
+                                else:
+                                    line = str(line_data).strip()
+                                if line:
+                                    output_log.append(clean_ansi(line))
+                            elif f_event == "result":
+                                status_data = f_data.get("data", {})
+                                success = (status_data.get("status") == "completed" or status_data.get("success") is True) if isinstance(status_data, dict) else True
+                                status_text = "УСПЕШНО" if success else "ОШИБКА"
+                                tail_logs = "\n".join(output_log[-35:])
+                                return f"✅ Онлайн-переименование `{config_name}` → `{new_name_clean}.yaml` завершено ({status_text}).\n\nЛог процесса:\n{tail_logs}"
+
+                    new_cfg = (result or {}).get("configuration", f"{new_name_clean}.yaml") if isinstance(result, dict) else f"{new_name_clean}.yaml"
+                    return f"✅ Конфигурация `{config_name}` успешно переименована в `{new_cfg}`."
 
                 elif action == "delete":
-                    return f"✅ Конфигурация `{configuration}` и связанные файлы удалены."
+                    return f"✅ Конфигурация `{config_name}` и связанные файлы удалены."
+
+    except Exception as e:
+        error_msg = f"Критическая ошибка manage_device_config ({url}): {str(e)}"
+        logger.error(error_msg)
+        return error_msg
 
     except Exception as e:
         error_msg = f"Критическая ошибка manage_device_config ({url}): {str(e)}"
@@ -1084,6 +1200,8 @@ async def batch_compile_and_flash(
     configurations: list[str],
     action: str = "install",
     port: str = "OTA",
+    force_local: bool = False,
+    bootloader: bool = False,
     host: str = DEFAULT_HOST,
     api_port: int = DEFAULT_PORT
 ) -> str:
@@ -1092,12 +1210,16 @@ async def batch_compile_and_flash(
 
     Параметр action поддерживает:
       - "compile" — пакетная компиляция без прошивки (firmware/compile_bulk)
-      - "install" — пакетная компиляция + OTA-прошивка (firmware/install_bulk).
+      - "install" — пакетная компиляция + OTA/Serial-прошивка (firmware/install_bulk).
                     Для оффлайн-устройств обновление откладывается и применяется при следующем включении.
 
     Параметры:
       - configurations: список YAML-файлов устройств (например ["test.yaml", "ina226.yaml"])
-      - port: "OTA" (по умолчанию) или serial-порт для прошивки
+      - port: "OTA" (по умолчанию для сетевой прошивки), IP-адрес или serial-порт
+      - force_local: если True, принудительная локальная сборка без кэша/offloading
+      - bootloader: если True, выполняет также прошивку загрузчика
+      - host: хост сервера ESPHome (по умолчанию из .env или localhost)
+      - api_port: сетевой порт WebSocket API ESPHome (по умолчанию из .env или 6052)
     """
     if not configurations:
         return "Ошибка: список configurations пустой."
@@ -1106,9 +1228,14 @@ async def batch_compile_and_flash(
         return f"Ошибка: неизвестное действие '{action}'. Допустимые: compile, install."
 
     command = "firmware/compile_bulk" if action == "compile" else "firmware/install_bulk"
-    args: dict = {"configurations": configurations}
+    resolved_configs = [resolve_configuration(c) for c in configurations]
+    args: dict = {"configurations": resolved_configs}
     if action == "install":
-        args["port"] = port
+        args["port"] = port if port else "OTA"
+    if force_local:
+        args["force_local"] = True
+    if bootloader:
+        args["bootloader"] = True
 
     url = get_ws_url(host, api_port)
     msg_id = "batch_flash_1"

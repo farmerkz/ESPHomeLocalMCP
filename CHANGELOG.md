@@ -9,11 +9,30 @@
 
 ## [Unreleased]
 
+---
+
+## [1.2.0] - 2026-08-21
+
 ### Added
+- **Расширение управления конфигурациями (Пункт 1.3 ROADMAP):**
+  - Поддержка создания устройств из типовых шаблонов плат (`board_id`) без необходимости ручной передачи полного YAML-контента.
+  - Интеграция с `secrets.yaml`: автоматическое сохранение реквизитов Wi-Fi (`ssid`, `psk`) при создании конфигурации через `!secret wifi_ssid`.
+  - Поддержка онлайн двухшагового переименования устройства (`devices/rename` с `config_only=False`: сборка → OTA-прошивка старого адреса → атомарная смена файлов) с подпиской на стрим логов.
+  - Добавлены параметры `board_id`, `friendly_name`, `ssid`, `psk`, `config_only`, `overwrite` в `manage_device_config`.
+  - Реализован изолированный тест жизненного цикла `test_device_config_crud_lifecycle` с гарантированной очисткой (Teardown Guard).
+
+---
+## [1.1.0] - 2026-08-21
+
+### Added
+- **Расширение параметров прошивки и компиляции (Пункт 1.2 ROADMAP):**
+  - Поддержка гибкого выбора целевого порта/адреса устройства (`port: "OTA"` по умолчанию, явный IP-адрес или Serial-порт) в `flash_ota`, `compile_and_flash`, `batch_compile_and_flash`.
+  - Поддержка принудительной локальной сборки без кэша/offloading (`force_local: bool = False`) в `compile_firmware`, `compile_and_flash`, `batch_compile_and_flash`.
+  - Поддержка прошивки образа загрузчика (`bootloader: bool = False`) в `flash_ota`, `compile_and_flash`, `batch_compile_and_flash`.
+  - Разделение параметров сетевого порта ESPHome сервера (`api_port: int = DEFAULT_PORT`) и целевого порта устройства (`port: str = "OTA"`).
 - Добавлена дорожная карта развития проекта ([`ROADMAP.md`](ROADMAP.md)) с чекбоксами для отслеживания задач и интеграции с официальным API.
 
 ---
-
 ## [1.0.0] - 2026-08-21
 
 ### Added

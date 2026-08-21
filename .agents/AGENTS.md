@@ -36,9 +36,9 @@
 
 1. **Базовые операции (Compile & Flash):**
    - `validate_yaml(configuration, host, port)` — быстрая валидация YAML (`devices/validate`)
-   - `compile_firmware(configuration, host, port)` — компиляция прошивки без загрузки (`firmware/compile`)
-   - `flash_ota(configuration, host, port)` — OTA-прошивка готового бинарника (`firmware/upload`)
-   - `compile_and_flash(configuration, host, port)` — полный цикл сборки и OTA-прошивки (`firmware/install`)
+   - `compile_firmware(configuration, force_local, host, port)` — компиляция прошивки без загрузки (`firmware/compile`)
+   - `flash_ota(configuration, port, bootloader, host, api_port)` — прошивка готового бинарника (OTA / IP / Serial, `firmware/upload`)
+   - `compile_and_flash(configuration, port, force_local, bootloader, host, api_port)` — полный цикл сборки и прошивки (`firmware/install`)
 
 2. **Мониторинг и отладка (P0):**
    - `list_devices(host, port)` — полный список устройств и их статусов (`devices/list`)
@@ -47,12 +47,12 @@
    - `search_yaml_configs(query, context_lines, case_sensitive, host, port)` — поиск подстроки по всем YAML-конфигурациям (`yaml/search`)
 
 3. **Управление конфигурациями, платами и сборками (P1):**
-   - `manage_device_config(action, configuration, content, new_name, allow_wipe, host, port)` — CRUD операций с YAML (`devices/*`)
+   - `manage_device_config(action, configuration, content, new_name, board_id, friendly_name, ssid, psk, config_only, overwrite, allow_wipe, host, port)` — CRUD операций с YAML, генерация по шаблону платы, secrets, офлайн/онлайн переименование (`devices/*`)
    - `get_board_info(action, board_id, platform, query, limit, host, port)` — информация о платах и их совместимости (`boards/*`)
    - `manage_build_jobs(action, configuration, job_id, status_filter, host, port)` — управление очередью компиляции и кэшем (`firmware/*`)
 
 4. **Пакетные операции, архивация, безопасность и версия (P2):**
-   - `batch_compile_and_flash(configurations, action, port, host, api_port)` — пакетная компиляция и прошивка (`firmware/*_bulk`)
+   - `batch_compile_and_flash(configurations, action, port, force_local, bootloader, host, api_port)` — пакетная компиляция и прошивка (`firmware/*_bulk`)
    - `archive_devices(action, configuration, host, port)` — архивация и восстановление устройств (`devices/*_archived`)
    - `manage_device_labels(configuration, label_ids, host, port)` — управление метками устройств (`devices/set_labels`)
    - `authenticate_esphome(username, password, token, host, port)` — аутентификация по паролю/токену (`auth/login`)
@@ -95,8 +95,10 @@
 - Обязательно считайте его (`await asyncio.wait_for(ws.recv(), timeout=2.0)`) и проверьте поле `requires_auth`.
 - Если `requires_auth` равно `True`, необходимо проверить наличие авторизации, иначе запросы упадут с ошибкой `not_authenticated`.
 
-### 3. Явная передача параметров OTA-прошивки
-- В командах `firmware/upload` и `firmware/install` для гарантированной прошивки "по воздуху" всегда явно передавайте параметр `"port": "OTA"` внутри словаря `args`.
+### 3. Передача целевого порта и флагов прошивки
+- В командах `firmware/upload` и `firmware/install` по умолчанию передается `"port": "OTA"` внутри словаря `args` для гарантированной прошивки "по воздуху". Также поддерживается явный IP-адрес/hostname или Serial-порт.
+- Сетевой порт сервера ESPHome задается параметром `api_port` (по умолчанию `6052`).
+- Опциональные флаги `force_local` и `bootloader` передаются в `args` только при установке в `True`.
 
 ### 4. Логирование и стандартный вывод (stdout)
 - В MCP-сервере, использующем `stdio` транспорт, стандартный вывод (`stdout`) зарезервирован исключительно под передачу JSON-RPC сообщений протокола.

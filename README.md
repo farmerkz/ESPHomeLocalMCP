@@ -1,6 +1,6 @@
 # ESPHome Local MCP Server
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](CHANGELOG.md)
 [![SemVer 2.0.0](https://img.shields.io/badge/SemVer-2.0.0-green.svg)](https://semver.org/)
 [![Documentation](https://img.shields.io/badge/docs-API.md-orange.svg)](https://github.com/esphome/device-builder/blob/main/docs/API.md)
 
@@ -18,7 +18,7 @@
 - **Нормализация путей:** Поддерживает два формата параметра `configuration`:
   - `mcp-test.yaml` — имя конфигурации в ESPHome API
   - `config/mcp-test.yaml` — автоматически обрезает префикс `config/`
-- **Гарантированная OTA-прошивка:** Инструменты установки явно используют параметр `port: "OTA"` для прошивки «по воздуху».
+- **Гибкая OTA и Serial-прошивка:** Инструменты установки по умолчанию используют `port: "OTA"` для сетевой прошивки «по воздуху», а также поддерживают передачу явного IP-адреса/hostname или Serial-порта (`/dev/ttyUSB0`).
 - **Проверка авторизации:** Сервер корректно определяет флаг `requires_auth` и предупредит агента, если ESPHome защищён паролем.
 - **Семантическое версионирование (SemVer):** Встроенное отслеживание версий, журнал изменений [`CHANGELOG.md`](CHANGELOG.md) и инструмент `get_server_version`.
 
@@ -33,9 +33,9 @@
 | # | Инструмент | API-команда | Описание |
 |---|-----------|-------------|----------|
 | 1 | `validate_yaml(configuration, host, port)` | `devices/validate` | Быстрая проверка синтаксиса и структуры YAML без компиляции C++ кода |
-| 2 | `compile_firmware(configuration, host, port)` | `firmware/compile` | Полная компиляция прошивки без прошивки устройства |
-| 3 | `flash_ota(configuration, host, port)` | `firmware/upload` | Прошивка уже скомпилированного бинарника по воздуху (OTA) |
-| 4 | `compile_and_flash(configuration, host, port)` | `firmware/install` | Полный цикл: компиляция и OTA-прошивка одной командой |
+| 2 | `compile_firmware(configuration, force_local, host, port)` | `firmware/compile` | Полная компиляция прошивки без загрузки; поддерживает принудительную локальную сборку (`force_local`) |
+| 3 | `flash_ota(configuration, port, bootloader, host, api_port)` | `firmware/upload` | Прошивка готового бинарника (по умолчанию `"OTA"`, явный IP или Serial); поддержка записи bootloader |
+| 4 | `compile_and_flash(configuration, port, force_local, bootloader, host, api_port)` | `firmware/install` | Полный цикл сборки и прошивки (OTA / IP / Serial); поддержка `force_local` и `bootloader` |
 
 ---
 
@@ -54,7 +54,7 @@
 
 | # | Инструмент | API-команды | Описание |
 |---|-----------|-------------|----------|
-| 9 | `manage_device_config(action, configuration, content, new_name, allow_wipe, host, port)` | `devices/get_config`, `devices/update_config`, `devices/create`, `devices/rename`, `devices/delete` | CRUD для YAML-конфигураций: чтение, запись, создание, переименование и удаление через API |
+| 9 | `manage_device_config(action, configuration, content, new_name, board_id, friendly_name, ssid, psk, config_only, overwrite, allow_wipe, host, port)` | `devices/get_config`, `devices/update_config`, `devices/create`, `devices/rename`, `devices/delete` | Управление YAML: CRUD, создание по шаблону платы (`board_id`), интеграция с `secrets.yaml` (Wi-Fi), офлайн (`config_only=True`) и онлайн (`config_only=False`) переименование |
 | 10 | `get_board_info(action, board_id, platform, query, limit, host, port)` | `boards/get_boards`, `boards/get_board`, `boards/get_compatible_boards` | Каталог плат ESPHome: поиск, полная информация (распиновка, features, docs), список взаимозаменяемых плат |
 | 11 | `manage_build_jobs(action, configuration, job_id, status_filter, host, port)` | `firmware/get_jobs`, `firmware/get_job`, `firmware/cancel`, `firmware/clean`, `firmware/reset_build_env` | Управление очередью сборки: просмотр задач, отмена, очистка кэша сборки устройства, глобальный сброс `.esphome/` |
 
@@ -64,7 +64,7 @@
 
 | # | Инструмент | API-команды | Описание |
 |---|-----------|-------------|----------|
-| 12 | `batch_compile_and_flash(configurations, action, port, host, api_port)` | `firmware/compile_bulk`, `firmware/install_bulk` | Пакетная компиляция и/или OTA-прошивка группы устройств; поддерживает отложенные обновления (deferred install) для оффлайн-устройств |
+| 12 | `batch_compile_and_flash(configurations, action, port, force_local, bootloader, host, api_port)` | `firmware/compile_bulk`, `firmware/install_bulk` | Пакетная компиляция и/или OTA/Serial-прошивка группы устройств; поддерживает отложенные обновления (deferred install) для оффлайн-устройств, флаги `force_local` и `bootloader` |
 | 13 | `archive_devices(action, configuration, host, port)` | `devices/archive`, `devices/unarchive`, `devices/list_archived`, `devices/delete_archived` | Мягкое удаление устройств в архив (обратимо), восстановление и просмотр архива |
 | 14 | `manage_device_labels(configuration, label_ids, host, port)` | `devices/set_labels` | Установка/удаление меток (тегов) устройств для организации парка |
 | 15 | `authenticate_esphome(username, password, token, host, port)` | `auth/login` | Аутентификация на ESPHome-серверах, защищённых паролем (`requires_auth=true`) |
