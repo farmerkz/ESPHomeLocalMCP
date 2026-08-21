@@ -3170,6 +3170,209 @@ async def get_firmware_binaries(
 
 
 @mcp.tool()
+async def manage_remote_build(
+    action: str = "get_settings",
+    enabled: bool | None = None,
+    cleanup_ttl_seconds: int | None = None,
+    hostname: str = "",
+    target_port: int = 6052,
+    pairing_key: str = "",
+    peer_id: str = "",
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
+) -> str:
+    """
+    Инструмент 27 (P2): Управление распределенной кластерной компиляцией (Remote Build / Offloading).
+
+    Позволяет агенту мониторить состояние распределенной сборки, настраивать параметры offloading,
+    выполнять сопряжение с удаленными узлами сборки (handshake Noise XX / fingerprint), одобрять и удалять пиры.
+
+    Параметр action поддерживает:
+      - "get_settings" — получение текущих настроек кластерной компиляции и списка подключенных пиров (remote_build/get_settings).
+      - "set_settings" — обновление настроек (enabled, cleanup_ttl_seconds) (remote_build/set_settings).
+      - "preview_pair" — предварительная проверка и получение fingerprint публичного ключа удаленного узла (remote_build/preview_pair).
+                         Требует: hostname, опционально: target_port (по умолчанию 6052).
+      - "request_pair" — запрос сопряжения с удаленным узлом компиляции (remote_build/request_pair).
+                         Требует: hostname, опционально: target_port, pairing_key.
+      - "approve_peer" — одобрение входящего запроса на сопряжение от пира (remote_build/approve_peer).
+                         Требует: peer_id.
+      - "unpair"       — разрыв сопряжения с пиром (remote_build/unpair).
+                         Требует: peer_id.
+      - "remove_peer"  — удаление пира из конфигурации (remote_build/remove_peer).
+                         Требует: peer_id.
+
+    Параметры:
+      - action:              режим работы ("get_settings", "set_settings", "preview_pair", "request_pair", "approve_peer", "unpair", "remove_peer")
+      - enabled:             включение/отключение кластерной компиляции при set_settings (bool)
+      - cleanup_ttl_seconds: время хранения артефактов в секундах при set_settings (int)
+      - hostname:            хост/IP удаленного узла компиляции для сопряжения
+      - target_port:         сетевой порт удаленного узла компиляции (по умолчанию 6052)
+      - pairing_key:         ключ авторизации для сопряжения (если требуется удаленным сервером)
+      - peer_id:             идентификатор пира/узла сборки
+      - host:                хост сервера ESPHome
+      - port:                сетевой порт WebSocket API ESPHome
+    """
+    url = get_ws_url(host, port)
+    msg_id = "remote_build_tool_1"
+    action = action.strip().lower()
+
+    valid_actions = ("get_settings", "set_settings", "preview_pair", "request_pair", "approve_peer", "unpair", "remove_peer")
+    if action not in valid_actions:
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: get_settings, set_settings, preview_pair, request_pair, approve_peer, unpair, remove_peer."
+
+    if action in ("preview_pair", "request_pair") and not hostname.strip():
+        return f"Ошибка: для действия '{action}' необходимо указать параметр 'hostname' (хост или IP-адрес удаленного билдера)."
+
+    if action in ("approve_peer", "unpair", "remove_peer") and not peer_id.strip():
+        return f"Ошибка: для действия '{action}' необходимо указать параметр 'peer_id' (идентификатор узла сборки)."
+
+    logger.info(f"manage_remote_build: action={action!r}, hostname={hostname!r}, peer_id={peer_id!r}")
+
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
+
+            if action == "get_settings":
+                await ws.send(json.dumps({
+                    "command": "remote_build/get_settings",
+                    "message_id": msg_id,
+                    "args": {}
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка получения настроек remote_build: {data.get('details', data)}"
+
+                res = data.get("result", {}) or {}
+                is_enabled = res.get("enabled", False)
+                ttl = res.get("cleanup_ttl_seconds", 0)
+                peers = res.get("peers", []) or []
+
+                status_emoji = "🟢 Включена (enabled=True)" if is_enabled else "🔴 Отключена (enabled=False)"
+                ttl_hours = round(ttl / 3600, 1) if ttl else 0
+
+                output = [
+                    "### 🏗 Настройки кластерной компиляции ESPHome (Remote Build):\n",
+                    f"- **Статус кластера:** `{status_emoji}`",
+                    f"- **TTL очистки сборок:** `{ttl:,} сек` (~{ttl_hours} ч)",
+                    f"- **Подключенные узлы / пиры ({len(peers)} шт.):**"
+                ]
+
+                if not peers:
+                    output.append("  *(список узлов пуст, сопряженные билдеры отсутствуют)*")
+                else:
+                    for p in peers:
+                        p_id = p.get("id") or p.get("peer_id") or "N/A"
+                        p_host = p.get("hostname") or p.get("host") or "N/A"
+                        p_port = p.get("port") or 6052
+                        p_status = p.get("status", "unknown")
+                        p_name = p.get("name", "Remote Builder")
+                        output.append(f"  - **{p_name}** (`{p_id}`): `{p_host}:{p_port}` | статус: `{p_status}`")
+
+                return "\n".join(output)
+
+            elif action == "set_settings":
+                args_dict = {}
+                if enabled is not None:
+                    args_dict["enabled"] = enabled
+                if cleanup_ttl_seconds is not None:
+                    args_dict["cleanup_ttl_seconds"] = cleanup_ttl_seconds
+
+                if not args_dict:
+                    return "Предупреждение: для set_settings не переданы параметры обновления (enabled или cleanup_ttl_seconds)."
+
+                await ws.send(json.dumps({
+                    "command": "remote_build/set_settings",
+                    "message_id": msg_id,
+                    "args": args_dict
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка обновления настроек remote_build: {data.get('details', data)}"
+
+                res = data.get("result", {}) or {}
+                is_enabled = res.get("enabled", False)
+                ttl = res.get("cleanup_ttl_seconds", 0)
+
+                return (
+                    f"### ✅ Настройки кластерной компиляции успешно обновлены!\n\n"
+                    f"- **Кластерная сборка:** `{'Включена' if is_enabled else 'Отключена'}` (enabled={is_enabled})\n"
+                    f"- **TTL очистки:** `{ttl:,} сек`\n"
+                )
+
+            elif action == "preview_pair":
+                t_host = hostname.strip()
+                t_port = target_port if target_port else 6052
+                await ws.send(json.dumps({
+                    "command": "remote_build/preview_pair",
+                    "message_id": msg_id,
+                    "args": {"hostname": t_host, "port": t_port}
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=15.0))
+                if data.get("error_code"):
+                    return f"Ошибка предварительной проверки сопряжения с `{t_host}:{t_port}`: {data.get('details', data)}"
+
+                res = data.get("result", {}) or {}
+                fingerprint = res.get("fingerprint") or res.get("public_key_fingerprint") or "N/A"
+                req_key = res.get("requires_pairing_key", False)
+
+                return (
+                    f"### 🤝 Результат проверки узла для сопряжения `{t_host}:{t_port}`:\n\n"
+                    f"- **Fingerprint публичного ключа:** `{fingerprint}`\n"
+                    f"- **Требуется pairing key:** `{'Да' if req_key else 'Нет'}`\n\n"
+                    f"💡 Для завершения сопряжения вызовите `action='request_pair', hostname='{t_host}', target_port={t_port}`."
+                )
+
+            elif action == "request_pair":
+                t_host = hostname.strip()
+                t_port = target_port if target_port else 6052
+                args_dict = {"hostname": t_host, "port": t_port}
+                if pairing_key.strip():
+                    args_dict["pairing_key"] = pairing_key.strip()
+
+                await ws.send(json.dumps({
+                    "command": "remote_build/request_pair",
+                    "message_id": msg_id,
+                    "args": args_dict
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=15.0))
+                if data.get("error_code"):
+                    return f"Ошибка запроса сопряжения с `{t_host}:{t_port}`: {data.get('details', data)}"
+
+                res = data.get("result", {}) or {}
+                return (
+                    f"### 🚀 Запрос на сопряжение с `{t_host}:{t_port}` успешно отправлен!\n\n"
+                    f"Ответ сервера: `{res if res else 'OK'}`"
+                )
+
+            elif action in ("approve_peer", "unpair", "remove_peer"):
+                target_pid = peer_id.strip()
+                await ws.send(json.dumps({
+                    "command": f"remote_build/{action}",
+                    "message_id": msg_id,
+                    "args": {"peer_id": target_pid}
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка выполнения команды '{action}' для пира `{target_pid}`: {data.get('details', data)}"
+
+                res = data.get("result", {}) or {}
+                action_titles = {
+                    "approve_peer": "одобрен",
+                    "unpair": "сопряжение разорвано",
+                    "remove_peer": "удален из конфигурации"
+                }
+                return f"### ✅ Пир `{target_pid}` успешно {action_titles.get(action, action)}!"
+
+    except Exception as e:
+        error_msg = f"Критическая ошибка manage_remote_build ({url}): {str(e)}"
+        logger.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
 async def authenticate_esphome(
     username: str = "",
     password: str = "",

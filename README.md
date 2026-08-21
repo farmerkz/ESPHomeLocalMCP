@@ -1,12 +1,23 @@
 # ESPHome Local MCP Server
 
-[![Version](https://img.shields.io/badge/version-1.11.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.12.0-blue.svg)](CHANGELOG.md)
 [![SemVer 2.0.0](https://img.shields.io/badge/SemVer-2.0.0-green.svg)](https://semver.org/)
 [![Documentation](https://img.shields.io/badge/docs-API.md-orange.svg)](https://github.com/esphome/device-builder/blob/main/docs/API.md)
 
 Локальный сервер протокола MCP (Model Context Protocol) для интеграции **ESPHome Device Builder** с AI-ассистентами (Cursor, VS Code Copilot, Claude Desktop, Gemini CLI, Antigravity).
 
 Позволяет языковым моделям (LLM) автономно управлять всем жизненным циклом устройств ESPHome: валидировать конфигурации, компилировать и прошивать (OTA) прошивки, читать runtime-логи, расшифровывать дампы паники, производить поиск по всем конфигурациям, управлять платами, задачами сборки, архивом устройств и правами доступа — напрямую через WebSocket API ESPHome Device Builder.
+
+## 📖 Официальная документация API
+
+Сервер полностью построен на спецификации протокола **ESPHome Device Builder API**:
+
+- **Официальный справочник API:** [**ESPHome Device Builder API Reference (docs/API.md)**](https://github.com/esphome/device-builder/blob/main/docs/API.md)
+- Спецификация описывает:
+  - Форматы сообщений WebSocket (`CommandMessage`, `ResultMessage`, `EventMessage`, `ErrorMessage`)
+  - Все группы команд (`devices/*`, `firmware/*`, `boards/*`, `components/*`, `automations/*`, `remote_build/*`, `config/*`, `labels/*`, `auth/*` и др.)
+  - Коды ошибок (`ErrorCode`) и контракты потоковых подписок (`output` ➔ `result`)
+  - Процедуру рукопожатия (Noise XX handshake) и аутентификации
 
 ## 🌟 Возможности
 
@@ -24,7 +35,7 @@
 
 ## 🛠 Доступные MCP Инструменты
 
-Сервер предоставляет **26 инструментов** для AI-агентов, разбитых на 4 группы. Каждая команда поддерживает опциональное переопределение `host` и `port` (`api_port`).
+Сервер предоставляет **27 инструментов** для AI-агентов, разбитых на 4 группы. Каждая команда поддерживает опциональное переопределение `host` и `port` (`api_port`).
 
 ---
 
@@ -68,7 +79,7 @@
 
 ---
 
-### Группа 4: Пакетные Операции Сборки, Архивация, Git-История, Безопасность и Версии (P2)
+### Группа 4: Пакетные Операции Сборки, Архивация, Git-История, Кластерная Сборка, Безопасность и Версии (P2)
 
 | # | Инструмент | API-команды | Описание |
 |---|-----------|-------------|----------|
@@ -77,8 +88,9 @@
 | 22 | `archive_devices(action, configuration, host, port)` | `devices/archive`, `devices/unarchive`, `devices/list_archived`, `devices/delete_archived` | Мягкое удаление устройств в архив (обратимо), восстановление и просмотр архива |
 | 23 | `manage_device_labels(configuration, label_ids, host, port)` | `devices/set_labels` | Установка/удаление меток (тегов) одного конкретного устройства |
 | 24 | `manage_version_history(action, configuration, sha, sha_compare, max_count, config_dir, host, port)` | Git CLI / `devices/*` | История изменений конфигураций (Git Version History): просмотр коммитов (`log`), изменений (`diff`), содержимого ревизии (`show`), удаленных файлов (`deleted`) и безопасный откат (`restore`) через API |
-| 25 | `authenticate_esphome(username, password, token, host, port)` | `auth/login` | Аутентификация на ESPHome-серверах, защищённых паролем (`requires_auth=true`) |
-| 26 | `get_server_version()` | internal / SSOT | Получение информации о версии MCP-сервера (SemVer), протоколе и среде |
+| 25 | `manage_remote_build(action, enabled, cleanup_ttl_seconds, hostname, target_port, pairing_key, peer_id, host, port)` | `remote_build/get_settings`, `remote_build/set_settings`, `remote_build/preview_pair`, `remote_build/request_pair`, `remote_build/unpair`, `remote_build/approve_peer`, `remote_build/remove_peer` | Управление распределенной кластерной компиляцией (Remote Build / Offloading): мониторинг, настройка параметров, безопасное сопряжение (Noise XX handshake / fingerprint) и управление пирами |
+| 26 | `authenticate_esphome(username, password, token, host, port)` | `auth/login` | Аутентификация на ESPHome-серверах, защищённых паролем (`requires_auth=true`) |
+| 27 | `get_server_version()` | internal / SSOT | Получение информации о версии MCP-сервера (SemVer), протоколе и среде |
 
 ---
 

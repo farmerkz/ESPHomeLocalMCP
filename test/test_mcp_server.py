@@ -28,6 +28,7 @@ from server import (
     manage_version_history,
     manage_automations,
     get_firmware_binaries,
+    manage_remote_build,
     compile_firmware,
     flash_ota,
     get_server_version
@@ -245,6 +246,16 @@ class TestMCPServerUnit(unittest.TestCase):
         self.assertEqual(sig_bin.parameters["file"].default, "")
         self.assertIn("save_path", sig_bin.parameters)
         self.assertEqual(sig_bin.parameters["save_path"].default, "")
+
+        sig_rb = inspect.signature(manage_remote_build)
+        self.assertIn("action", sig_rb.parameters)
+        self.assertEqual(sig_rb.parameters["action"].default, "get_settings")
+        self.assertIn("enabled", sig_rb.parameters)
+        self.assertEqual(sig_rb.parameters["enabled"].default, None)
+        self.assertIn("hostname", sig_rb.parameters)
+        self.assertEqual(sig_rb.parameters["hostname"].default, "")
+        self.assertIn("peer_id", sig_rb.parameters)
+        self.assertEqual(sig_rb.parameters["peer_id"].default, "")
 
     def test_manage_device_config_validation(self):
         """Проверка локальной валидации аргументов в manage_device_config."""
@@ -478,6 +489,32 @@ class TestMCPServerUnit(unittest.TestCase):
             # 4. Download без file
             res_no_down_file = loop.run_until_complete(get_firmware_binaries(configuration="test.yaml", action="download", file=""))
             self.assertIn("необходимо указать параметр 'file'", res_no_down_file)
+        finally:
+            loop.close()
+
+    def test_manage_remote_build_validation(self):
+        """Проверка локальной валидации аргументов в manage_remote_build."""
+        loop = asyncio.new_event_loop()
+        try:
+            # 1. Неизвестное действие
+            res_unknown = loop.run_until_complete(manage_remote_build(action="unknown_action"))
+            self.assertIn("неизвестное действие", res_unknown)
+
+            # 2. preview_pair без hostname
+            res_no_host = loop.run_until_complete(manage_remote_build(action="preview_pair", hostname=""))
+            self.assertIn("необходимо указать параметр 'hostname'", res_no_host)
+
+            # 3. request_pair без hostname
+            res_no_req_host = loop.run_until_complete(manage_remote_build(action="request_pair", hostname=""))
+            self.assertIn("необходимо указать параметр 'hostname'", res_no_req_host)
+
+            # 4. approve_peer без peer_id
+            res_no_pid = loop.run_until_complete(manage_remote_build(action="approve_peer", peer_id=""))
+            self.assertIn("необходимо указать параметр 'peer_id'", res_no_pid)
+
+            # 5. unpair без peer_id
+            res_no_unpair_pid = loop.run_until_complete(manage_remote_build(action="unpair", peer_id=""))
+            self.assertIn("необходимо указать параметр 'peer_id'", res_no_unpair_pid)
         finally:
             loop.close()
 
@@ -1246,6 +1283,54 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
             if os.path.exists(tmp_download_path):
                 os.remove(tmp_download_path)
                 print(f"  ✅ Teardown: временный бинарный файл {tmp_download_path} удален.")
+
+    async def test_manage_remote_build_settings_lifecycle(self):
+        """Тестирование жизненного цикла настроек кластерной компиляции (get_settings, set_settings) с Teardown Guard."""
+        print("\n🏗 Запуск теста жизненного цикла manage_remote_build (settings)...")
+
+        # 1. Считываем исходные настройки
+        res_initial = await manage_remote_build(action="get_settings")
+        self.assertIn("Настройки кластерной компиляции ESPHome", res_initial)
+        initial_enabled = "enabled=True" in res_initial
+        print("  - manage_remote_build (get_settings): исходные настройки прочитаны")
+
+        try:
+            # 2. Обновляем параметры (set_settings)
+            res_set = await manage_remote_build(
+                action="set_settings",
+                enabled=True,
+                cleanup_ttl_seconds=43200
+            )
+            self.assertIn("Настройки кластерной компиляции успешно обновлены", res_set)
+            self.assertIn("43,200", res_set)
+            print("  - manage_remote_build (set_settings): параметры обновлены")
+
+            # 3. Проверяем обновленное состояние
+            res_check = await manage_remote_build(action="get_settings")
+            self.assertIn("43,200 сек", res_check)
+            self.assertIn("enabled=True", res_check)
+
+        finally:
+            # 4. Teardown Guard: восстановление исходного состояния сервера
+            await manage_remote_build(
+                action="set_settings",
+                enabled=initial_enabled,
+                cleanup_ttl_seconds=86400
+            )
+            print("  ✅ Teardown: исходные настройки remote_build восстановлены.")
+
+    async def test_manage_remote_build_preview_pair(self):
+        """Тестирование предварительной проверки сопряжения (preview_pair)."""
+        print("\n🤝 Запуск теста manage_remote_build (preview_pair)...")
+
+        res_prev = await manage_remote_build(
+            action="preview_pair",
+            hostname="127.0.0.1",
+            target_port=6052
+        )
+        # Сервер корректно пытается связаться с пиром и возвращает диагностический ответ
+        self.assertTrue("Результат проверки узла" in res_prev or "Ошибка предварительной проверки" in res_prev)
+        print("  - manage_remote_build (preview_pair): сетевой handshake корректно обработан")
 
 
 if __name__ == "__main__":

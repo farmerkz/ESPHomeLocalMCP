@@ -176,7 +176,7 @@
 ---
 
 ### 3.5. Кластерная сборка (Remote Build / Offloading)
-- [ ] **3.5.1. Управление узлами распределенной сборки (`remote_build/*`)**
+- [x] ✅ **3.5.1. Управление узлами распределенной сборки (`manage_remote_build`)**
   - **Команды API:** `remote_build/get_settings`, `remote_build/set_settings`, `remote_build/preview_pair`, `remote_build/request_pair`, `remote_build/unpair`, `remote_build/approve_peer`, `remote_build/remove_peer`.
   - **Описание:** Мониторинг и управление сопряжением с удаленными серверами компиляции.
 
@@ -186,6 +186,7 @@
 
 | Дата | Версия | Описание изменений |
 | :--- | :---: | :--- |
+| **2026-08-21** | `1.12.0` | Реализован пункт 3.5: новый инструмент `manage_remote_build` для мониторинга кластерной компиляции, настройки TTL кэша и сопряжения с удаленными узлами сборки. **Полностью завершена Фаза 3 (P2)**! |
 | **2026-08-21** | `1.11.0` | Реализован пункт 3.4: новый инструмент `get_firmware_binaries` для инспекции артефактов прошивки, генерации токенов скачивания и прямой загрузки бинарников по HTTP. |
 | **2026-08-21** | `1.10.0` | Реализован пункт 3.3: новый инструмент `manage_automations` для работы с AST автоматизаций ESPHome (parse, available, triggers, actions, conditions, upsert, delete с поддержкой dry-run и apply). |
 | **2026-08-21** | `1.9.0` | Реализован пункт 3.2: новый инструмент `manage_version_history` для Git-версионирования конфигураций (log, diff, show, deleted, restore с откатом через API ESPHome). |
