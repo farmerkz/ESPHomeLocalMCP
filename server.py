@@ -2261,6 +2261,183 @@ async def batch_manage_devices(
 
 
 @mcp.tool()
+async def troubleshoot_device(
+    configuration: str = "",
+    action: str = "probe",
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
+) -> str:
+    """
+    Инструмент 23 (P2): Глубокая диагностика сети и доступности устройств ESPHome.
+
+    Позволяет агенту выполнять детальную диагностику сетевой доступности устройств:
+    одновременную проверку ICMP-пинга, DNS-резолвинга, mDNS/Zeroconf кэша и поиск сетевых аномалий,
+    а также быстрый опрос статусов доступности всех устройств парка.
+
+    Параметр action поддерживает:
+      - "probe"  — глубокая диагностика конкретного устройства (devices/troubleshoot).
+                   Требует параметр configuration.
+      - "states" — получение таблицы онлайн/офлайн статусов всех устройств (devices/get_states).
+
+    Параметры:
+      - configuration: имя YAML-файла устройства (например "test.yaml", "ina226.yaml")
+      - action:        режим работы ("probe" по умолчанию или "states")
+      - host:          хост сервера ESPHome
+      - port:          сетевой порт WebSocket API ESPHome
+    """
+    url = get_ws_url(host, port)
+    msg_id = "troubleshoot_tool_1"
+    action = action.strip().lower()
+
+    valid_actions = ("probe", "states")
+    if action not in valid_actions:
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: probe, states."
+
+    if action == "probe":
+        if not configuration:
+            return "Ошибка: для действия 'probe' необходимо указать параметр 'configuration' (YAML-файл устройства)."
+        cfg_clean = resolve_configuration(configuration)
+        command = "devices/troubleshoot"
+        args = {"configuration": cfg_clean}
+    elif action == "states":
+        cfg_clean = ""
+        command = "devices/get_states"
+        args = {}
+
+    logger.info(f"troubleshoot_device: action={action!r}, configuration={cfg_clean!r}")
+
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
+
+            await ws.send(json.dumps({
+                "command": command,
+                "message_id": msg_id,
+                "args": args
+            }))
+
+            # Для troubleshoot даем до 35 секунд таймаута на сетевые проверки (DNS + mDNS + Ping)
+            timeout = 35.0 if action == "probe" else 10.0
+            raw_msg = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            data = json.loads(raw_msg)
+
+            if data.get("error_code"):
+                return f"Ошибка команды troubleshoot ({action!r}): {data.get('details', data)}"
+
+            result = data.get("result", {})
+
+            if action == "states":
+                states_dict = result if isinstance(result, dict) else {}
+                online_devs = [k for k, v in states_dict.items() if v == "online"]
+                offline_devs = [k for k, v in states_dict.items() if v == "offline"]
+                unknown_devs = [k for k, v in states_dict.items() if v not in ("online", "offline")]
+
+                output = [f"### 📊 Статусы сетевой доступности устройств ESPHome ({len(states_dict)} устройств):\n"]
+                output.append(f"🟢 **Онлайн ({len(online_devs)}):**")
+                if online_devs:
+                    for d in sorted(online_devs):
+                        output.append(f"- `{d}`")
+                else:
+                    output.append("- *Нет устройств онлайн*")
+
+                output.append(f"\n🔴 **Офлайн ({len(offline_devs)}):**")
+                if offline_devs:
+                    for d in sorted(offline_devs):
+                        output.append(f"- `{d}`")
+                else:
+                    output.append("- *Нет устройств офлайн*")
+
+                if unknown_devs:
+                    output.append(f"\n⚪ **Неизвестно ({len(unknown_devs)}):**")
+                    for d in sorted(unknown_devs):
+                        output.append(f"- `{d}`: {states_dict[d]}")
+
+                output.append("\n💡 Для детальной диагностики устройства используйте `troubleshoot_device configuration=<file.yaml>`")
+                return "\n".join(output)
+
+            elif action == "probe":
+                tb = result if isinstance(result, dict) else {}
+                cfg = tb.get("configuration", cfg_clean)
+                address = tb.get("address", "N/A")
+                dns_res = tb.get("dns_resolved", False)
+                dns_ips = tb.get("dns_addresses") or []
+                mdns_ips = tb.get("mdns_addresses") or []
+                mdns_ptr = tb.get("mdns_has_live_anchor_ptr", False)
+                mdns_trace = tb.get("mdns_has_cached_trace", False)
+                ping_att = tb.get("ping_attempted", False)
+                ping_target = tb.get("ping_target", "N/A")
+                ping_source = tb.get("ping_target_source", "N/A")
+                ping_rtt = tb.get("ping_rtt_ms")
+                icmp_avail = tb.get("icmp_available", True)
+                zc_running = tb.get("zeroconf_running", True)
+
+                # Анализ статуса
+                is_online = ping_rtt is not None and ping_rtt > 0
+
+                output = [f"### 🔍 Сетевая диагностика устройства `{cfg}`:\n"]
+                output.append(f"- **Целевой адрес (Address):** `{address}`")
+                status_icon = "🟢 **ДОСТУПНО (Online)**" if is_online else "🔴 **НЕДОСТУПНО (Offline)**"
+                output.append(f"- **Итоговый статус:** {status_icon}\n")
+
+                output.append("#### 📡 Результаты проверок:")
+
+                # DNS
+                if dns_res:
+                    ips_str = ", ".join(f"`{ip}`" for ip in dns_ips) if dns_ips else "IP не вернулся"
+                    output.append(f"- **DNS разрешение:** ✅ Успешно ({ips_str})")
+                else:
+                    output.append(f"- **DNS разрешение:** ❌ Не удалось разрешить имя")
+
+                # mDNS
+                if mdns_ips:
+                    mips_str = ", ".join(f"`{ip}`" for ip in mdns_ips)
+                    ptr_str = " (live PTR: ✅)" if mdns_ptr else ""
+                    output.append(f"- **mDNS / Zeroconf:** ✅ Обнаружен ({mips_str}){ptr_str}")
+                else:
+                    trace_str = " (есть след в кэше)" if mdns_trace else " (записи не найдены)"
+                    output.append(f"- **mDNS / Zeroconf:** ❌ Локальные анонсы не получены{trace_str}")
+
+                # Ping
+                if ping_att:
+                    if is_online:
+                        output.append(f"- **ICMP Ping:** ✅ Доступен (`{ping_target}`, источник: {ping_source}) — RTT: **{ping_rtt:.2f} ms**")
+                    else:
+                        output.append(f"- **ICMP Ping:** ❌ Нет ответа (`{ping_target}`, источник: {ping_source})")
+                else:
+                    output.append("- **ICMP Ping:** ⚪ Не выполнялся")
+
+                # Сервисы
+                srv_info = []
+                if not icmp_avail:
+                    srv_info.append("ICMP-сокеты недоступны на сервере")
+                if not zc_running:
+                    srv_info.append("Zeroconf демон не запущен")
+                if srv_info:
+                    output.append(f"- **Внимание к службам хоста:** {', '.join(srv_info)}")
+
+                # Экспертное заключение
+                output.append("\n#### 💡 Заключение диагностики:")
+                if is_online:
+                    output.append(f"Устройство активно в сети, откликается на сетевые запросы с задержкой {ping_rtt:.2f} ms.")
+                elif dns_res and not is_online:
+                    output.append(f"Устройство разрешается через DNS ({', '.join(dns_ips)}), но не отвечает на пинг и mDNS. Возможные причины: устройство обесточено, зависло или трафик блокируется файрволом/изоляцией клиентов в Wi-Fi сети.")
+                elif not dns_res and not mdns_ips:
+                    output.append("Устройство полностью отсутствует в локальной сети (не разрешается по DNS и не анонсирует себя по mDNS).")
+                else:
+                    output.append("Обнаружены частичные сетевые аномалии при опросе устройства.")
+
+                return "\n".join(output)
+
+    except Exception as e:
+        error_msg = f"Критическая ошибка troubleshoot_device ({url}): {str(e)}"
+        logger.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
 async def authenticate_esphome(
     username: str = "",
     password: str = "",

@@ -24,6 +24,7 @@ from server import (
     get_host_info,
     manage_labels,
     batch_manage_devices,
+    troubleshoot_device,
     compile_firmware,
     flash_ota,
     get_server_version
@@ -207,6 +208,12 @@ class TestMCPServerUnit(unittest.TestCase):
         self.assertIn("updates", sig_bulk.parameters)
         self.assertEqual(sig_bulk.parameters["updates"].default, None)
 
+        sig_tb = inspect.signature(troubleshoot_device)
+        self.assertIn("configuration", sig_tb.parameters)
+        self.assertEqual(sig_tb.parameters["configuration"].default, "")
+        self.assertIn("action", sig_tb.parameters)
+        self.assertEqual(sig_tb.parameters["action"].default, "probe")
+
     def test_manage_device_config_validation(self):
         """Проверка локальной валидации аргументов в manage_device_config."""
         loop = asyncio.new_event_loop()
@@ -351,6 +358,20 @@ class TestMCPServerUnit(unittest.TestCase):
             # 4. Set_labels без configurations и без updates
             res_no_lbl_args = loop.run_until_complete(batch_manage_devices(action="set_labels"))
             self.assertIn("необходимо передать либо 'configurations'", res_no_lbl_args)
+        finally:
+            loop.close()
+
+    def test_troubleshoot_device_validation(self):
+        """Проверка локальной валидации аргументов в troubleshoot_device."""
+        loop = asyncio.new_event_loop()
+        try:
+            # 1. Неизвестное действие
+            res_unknown = loop.run_until_complete(troubleshoot_device(action="unknown_action"))
+            self.assertIn("неизвестное действие", res_unknown)
+
+            # 2. Probe без configuration
+            res_no_cfg = loop.run_until_complete(troubleshoot_device(action="probe"))
+            self.assertIn("необходимо указать параметр 'configuration'", res_no_cfg)
         finally:
             loop.close()
 
@@ -854,6 +875,34 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
             if created_lid:
                 await manage_labels(action="delete", label_id=created_lid)
             print("  ✅ Teardown пакетных фикстур завершен.")
+
+    async def test_troubleshoot_device_states(self):
+        """Тестирование получения таблицы онлайн/офлайн статусов устройств (action='states')."""
+        print("\n📊 Запуск теста troubleshoot_device (action='states')...")
+        res_states = await troubleshoot_device(action="states")
+        self.assertIn("Статусы сетевой доступности устройств ESPHome", res_states)
+        self.assertIn("Онлайн", res_states)
+        self.assertIn("Офлайн", res_states)
+        print(f"  - troubleshoot_device (states): {res_states[:120]}...")
+
+    async def test_troubleshoot_device_probe(self):
+        """Тестирование глубокой сетевой диагностики онлайн и офлайн устройств (action='probe')."""
+        print("\n🔍 Запуск тестов troubleshoot_device (action='probe')...")
+
+        # 1. Диагностика базового тестового устройства test.yaml
+        res_probe_online = await troubleshoot_device(action="probe", configuration="test.yaml")
+        self.assertIn("Сетевая диагностика устройства `test.yaml`", res_probe_online)
+        self.assertIn("DNS разрешение:", res_probe_online)
+        self.assertIn("mDNS / Zeroconf:", res_probe_online)
+        self.assertIn("ICMP Ping:", res_probe_online)
+        print(f"  - troubleshoot_device (probe test.yaml): успешно получены сетевые метрики")
+
+        # 2. Диагностика устройства ina226.yaml (проверка локализации)
+        res_probe_off = await troubleshoot_device(action="probe", configuration="ina226.yaml")
+        self.assertIn("Сетевая диагностика устройства `ina226.yaml`", res_probe_off)
+        self.assertIn("DNS разрешение:", res_probe_off)
+        self.assertIn("ICMP Ping:", res_probe_off)
+        print(f"  - troubleshoot_device (probe ina226.yaml): успешно диагностировано состояние")
 
 
 if __name__ == "__main__":

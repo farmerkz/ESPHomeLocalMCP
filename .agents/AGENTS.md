@@ -32,7 +32,7 @@
 
 ---
 
-## 🛠 Доступные MCP Инструменты (22 инструмента)
+## 🛠 Доступные MCP Инструменты (23 инструмента)
 
 1. **Базовые операции (Compile & Flash):**
    - `validate_yaml(configuration, host, port)` — быстрая валидация YAML (`devices/validate`)
@@ -40,11 +40,12 @@
    - `flash_ota(configuration, port, bootloader, host, api_port)` — прошивка готового бинарника (OTA / IP / Serial, `firmware/upload`)
    - `compile_and_flash(configuration, port, force_local, bootloader, host, api_port)` — полный цикл сборки и прошивки (`firmware/install`)
 
-2. **Мониторинг и отладка (P0):**
+2. **Мониторинг, отладка и сетевая диагностика (P0/P2):**
    - `list_devices(host, port)` — полный список устройств и их статусов (`devices/list`)
    - `stream_device_logs(configuration, port, duration_seconds, lines_count, host, api_port)` — чтение логов в реальном времени (`devices/logs`)
    - `decode_crash_backtrace(configuration, lines, host, port)` — расшифровка C++ дампов паники (`devices/decode_backtrace`)
    - `search_yaml_configs(query, context_lines, case_sensitive, host, port)` — поиск подстроки по всем YAML-конфигурациям (`yaml/search`)
+   - `troubleshoot_device(configuration, action, host, port)` — глубокая сетевая диагностика доступности узла (DNS, mDNS, ICMP Ping RTT) и матриц статусов (`devices/troubleshoot`, `devices/get_states`)
 
 3. **Управление конфигурациями, секретами, метками, платами и сборками (P1):**
    - `manage_device_config(action, configuration, content, new_name, board_id, friendly_name, ssid, psk, config_only, overwrite, allow_wipe, host, port)` — CRUD операций с YAML, генерация по шаблону платы, secrets, офлайн/онлайн переименование (`devices/*`)
