@@ -18,6 +18,7 @@ from server import (
     get_board_info,
     manage_device_config,
     manage_build_jobs,
+    migrate_device_config,
     compile_firmware,
     flash_ota,
     get_server_version
@@ -141,6 +142,14 @@ class TestMCPServerUnit(unittest.TestCase):
         self.assertIn("status_filter", sig_jobs.parameters)
         self.assertEqual(sig_jobs.parameters["status_filter"].default, "")
 
+        sig_mig = inspect.signature(migrate_device_config)
+        self.assertIn("configuration", sig_mig.parameters)
+        self.assertEqual(sig_mig.parameters["configuration"].default, "")
+        self.assertIn("content", sig_mig.parameters)
+        self.assertEqual(sig_mig.parameters["content"].default, "")
+        self.assertIn("apply", sig_mig.parameters)
+        self.assertFalse(sig_mig.parameters["apply"].default)
+
     def test_manage_device_config_validation(self):
         """Проверка локальной валидации аргументов в manage_device_config."""
         loop = asyncio.new_event_loop()
@@ -186,6 +195,16 @@ class TestMCPServerUnit(unittest.TestCase):
             # 5. Clear_queued без configuration
             res_no_queued_cfg = loop.run_until_complete(manage_build_jobs(action="clear_queued"))
             self.assertIn("необходимо указать параметр configuration", res_no_queued_cfg)
+        finally:
+            loop.close()
+
+    def test_migrate_device_config_validation(self):
+        """Проверка локальной валидации аргументов в migrate_device_config."""
+        loop = asyncio.new_event_loop()
+        try:
+            # Вызов без configuration и content
+            res_no_args = loop.run_until_complete(migrate_device_config())
+            self.assertIn("необходимо указать либо параметр 'configuration'", res_no_args)
         finally:
             loop.close()
 
@@ -279,8 +298,8 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
         Использует уникальный временный идентификатор с гарантированной очисткой (Teardown Guard).
         """
         uid = uuid.uuid4().hex[:6]
-        fixture_name = f"mcp_fix_{uid}"
-        renamed_fixture_name = f"mcp_rn_{uid}"
+        fixture_name = f"mcp-fix-{uid}"
+        renamed_fixture_name = f"mcp-rn-{uid}"
         cfg_file = f"{fixture_name}.yaml"
         renamed_cfg_file = f"{renamed_fixture_name}.yaml"
 
@@ -385,6 +404,85 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
         queued_res = await manage_build_jobs(action="clear_queued", configuration="test.yaml")
         self.assertIn("успешно сброшено", queued_res)
         print(f"  - manage_build_jobs (action='clear_queued'): {queued_res}")
+
+    async def test_migrate_device_config_content_and_lifecycle(self):
+        """Тестирование автоматической миграции YAML синтаксиса (Dry-Run и Apply Lifecycle)."""
+        print("\n🔄 Запуск тестов migrate_device_config...")
+
+        # 1. Проверка актуального YAML (не требует миграции)
+        actual_yaml = "esphome:\n  name: test-act\nesp32:\n  board: esp32dev\n"
+        res_actual = await migrate_device_config(content=actual_yaml)
+        self.assertIn("не требует миграции", res_actual)
+        print(f"  - migrate_device_config (актуальный YAML): подтверждено отсутствие необходимости миграции")
+
+        # 2. Dry-Run проверка устаревшего YAML (services -> actions)
+        legacy_yaml = (
+            "esphome:\n"
+            "  name: test-legacy\n\n"
+            "esp32:\n"
+            "  board: esp32dev\n\n"
+            "api:\n"
+            "  services:\n"
+            "    - service: custom_service\n"
+            "      then:\n"
+            "        - logger.log: \"Legacy service test\"\n"
+        )
+        res_legacy_dry = await migrate_device_config(content=legacy_yaml, apply=False)
+        self.assertIn("Анализ миграции синтаксиса ESPHome", res_legacy_dry)
+        self.assertIn("actions", res_legacy_dry)
+        print(f"  - migrate_device_config (Dry-Run): успешно обнаружены устаревшие поля")
+
+        # 3. Сквозной жизненный цикл с применением миграции к файлу устройства (Apply Lifecycle)
+        uid = uuid.uuid4().hex[:6]
+        fixture_name = f"mcp-mig-{uid}"
+        cfg_file = f"{fixture_name}.yaml"
+
+        print(f"  - Запуск Apply Lifecycle миграции для фикстуры `{cfg_file}`...")
+        try:
+            # Создаем устройство с устаревшим YAML
+            fixture_legacy_content = (
+                f"esphome:\n"
+                f"  name: {fixture_name}\n\n"
+                f"esp32:\n"
+                f"  board: esp32dev\n\n"
+                f"logger:\n\n"
+                f"wifi:\n"
+                f"  ssid: \"Mock-Wifi\"\n\n"
+                f"api:\n"
+                f"  services:\n"
+                f"    - service: legacy_action\n"
+                f"      then:\n"
+                f"        - logger.log: \"Hello\"\n"
+            )
+            create_res = await manage_device_config(
+                action="create",
+                configuration=cfg_file,
+                content=fixture_legacy_content,
+                overwrite=True
+            )
+            self.assertIn("✅ Конфигурация создана:", create_res)
+
+            # Применяем миграцию (apply=True)
+            apply_res = await migrate_device_config(configuration=cfg_file, apply=True)
+            self.assertIn("успешно применена и сохранена", apply_res)
+            print(f"  - migrate_device_config (apply=True): {apply_res[:120]}...")
+
+            # Проверяем, что в файле сохранился мигрированный синтаксис
+            updated_content = await manage_device_config(action="get", configuration=cfg_file)
+            self.assertIn("actions:", updated_content)
+            self.assertIn("action: legacy_action", updated_content)
+            self.assertNotIn("services:", updated_content)
+
+            # Валидируем мигрированный файл через ESPHome API
+            val_res = await validate_yaml(cfg_file)
+            self.assertIn("УСПЕШНО", val_res)
+            print(f"  - validate_yaml ({cfg_file}): мигрированный конфиг валиден")
+
+        finally:
+            # Teardown Guard
+            print(f"  - Teardown: удаление временного файла `{cfg_file}`...")
+            await manage_device_config(action="delete", configuration=cfg_file)
+            print("  ✅ Teardown завершен.")
 
 
 if __name__ == "__main__":

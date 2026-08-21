@@ -863,8 +863,163 @@ async def manage_device_config(
         logger.error(error_msg)
         return error_msg
 
+
+def apply_yaml_diff(original: str, diff: dict) -> str:
+    """Применяет дифференциальный патч ESPHome API (1-indexed fromLine/toLine) к тексту YAML."""
+    if not diff or not isinstance(diff, dict):
+        return original
+    from_line = diff.get("fromLine", 1)
+    to_line = diff.get("toLine", 1)
+    replacement = diff.get("replacement", "")
+
+    lines = original.splitlines(keepends=True)
+    prefix = lines[:max(0, from_line - 1)]
+    suffix = lines[to_line:]
+
+    if replacement and not replacement.endswith("\n") and (suffix or original.endswith("\n")):
+        replacement += "\n"
+
+    migrated_lines = prefix + [replacement] + suffix
+    return "".join(migrated_lines)
+
+
+@mcp.tool()
+async def migrate_device_config(
+    configuration: str = "",
+    content: str = "",
+    apply: bool = False,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
+) -> str:
+    """
+    Инструмент 16 (P1): Автоматическая миграция устаревшего YAML синтаксиса ESPHome.
+
+    Анализирует YAML на наличие устаревших директив и ключевых слов (services -> actions,
+    clk_mode -> clk, rgb_order -> channel_colors, rp2040: -> rp2: и др.), получает дифференциальный
+    патч через API (editor/migrate_config) и опционально применяет его к файлу устройства.
+
+    Параметры:
+      - configuration:  имя YAML-файла устройства (например "test.yaml"). Если указан,
+                        исходный YAML считывается с сервера автоматически.
+      - content:        прямой текст YAML-конфигурации (для проверки без привязки к файлу).
+      - apply:          если True и указан configuration, автоматически сохраняет мигрированный
+                        YAML в файл устройства через API. Если False (по умолчанию) — выполняет
+                        безопасный предпросмотр (Dry Run).
+      - host:           хост сервера ESPHome
+      - port:           сетевой порт WebSocket API ESPHome
+    """
+    if not configuration and not content:
+        return "Ошибка: необходимо указать либо параметр 'configuration' (имя файла устройства), либо 'content' (текст YAML)."
+
+    url = get_ws_url(host, port)
+    msg_id = "migrate_config_1"
+    config_name = resolve_configuration(configuration) if configuration else ""
+
+    logger.info(f"migrate_device_config: configuration={config_name!r}, apply={apply!r}, content_len={len(content)}")
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
+
+            target_content = content
+            # Если content не передан, запрашиваем актуальный текст конфига с сервера
+            if not target_content and config_name:
+                get_id = "migrate_get_cfg_1"
+                await ws.send(json.dumps({
+                    "command": "devices/get_config",
+                    "message_id": get_id,
+                    "args": {"configuration": config_name}
+                }))
+                async for message in ws:
+                    data = json.loads(message)
+                    if data.get("message_id") != get_id:
+                        continue
+                    if data.get("error_code"):
+                        return f"Ошибка чтения конфигурации `{config_name}`: {data.get('details', data)}"
+                    result = data.get("result", {})
+                    target_content = result.get("content", "") if isinstance(result, dict) else str(result)
+                    break
+
+            if not target_content:
+                return f"Ошибка: не удалось получить содержимое конфигурации `{config_name}`."
+
+            # Отправка команды миграции
+            await ws.send(json.dumps({
+                "command": "editor/migrate_config",
+                "message_id": msg_id,
+                "args": {"content": target_content}
+            }))
+
+            async for message in ws:
+                data = json.loads(message)
+                if data.get("message_id") != msg_id:
+                    continue
+                if data.get("error_code"):
+                    return f"Ошибка команды editor/migrate_config: {data.get('details', data)}"
+
+                result = data.get("result", {})
+                yaml_diff = result.get("yaml_diff") if isinstance(result, dict) else None
+                changes = result.get("changes", []) if isinstance(result, dict) else []
+
+                if not yaml_diff and not changes:
+                    target_label = f"устройства `{config_name}`" if config_name else "переданного YAML"
+                    return f"✅ Конфигурация {target_label} не требует миграции — синтаксис полностью актуален."
+
+                migrated_content = apply_yaml_diff(target_content, yaml_diff)
+
+                output = ["### 🔄 Анализ миграции синтаксиса ESPHome:\n"]
+                if changes:
+                    output.append("**Обнаруженные устаревшие директивы:**")
+                    for ch in changes:
+                        scope = ch.get("scope", "")
+                        old_field = ch.get("old", "")
+                        new_field = ch.get("new", "")
+                        since = ch.get("since", "")
+                        scope_str = f" `{scope}.{old_field}`" if scope else f" `{old_field}`"
+                        since_str = f" (устарело с версии {since})" if since else ""
+                        output.append(f"- {scope_str} ➔ `{new_field}`{since_str}")
+
+                if yaml_diff:
+                    from_l = yaml_diff.get("fromLine")
+                    to_l = yaml_diff.get("toLine")
+                    output.append(f"\n**Дифференциальный патч (строки {from_l}–{to_l}):**")
+                    output.append("```yaml")
+                    output.append(yaml_diff.get("replacement", "").strip())
+                    output.append("```")
+
+                if apply and config_name:
+                    update_id = "migrate_update_cfg_1"
+                    await ws.send(json.dumps({
+                        "command": "devices/update_config",
+                        "message_id": update_id,
+                        "args": {
+                            "configuration": config_name,
+                            "content": migrated_content
+                        }
+                    }))
+                    async for u_msg in ws:
+                        u_data = json.loads(u_msg)
+                        if u_data.get("message_id") != update_id:
+                            continue
+                        if u_data.get("error_code"):
+                            return f"Ошибка применения миграции к `{config_name}`: {u_data.get('details', u_data)}"
+                        output.append(f"\n✅ **Миграция успешно применена и сохранена в `{config_name}`.**")
+                        return "\n".join(output)
+
+                if not apply and config_name:
+                    output.append(f"\n💡 *Для применения и сохранения изменений запустите команду с параметром `apply=True`.*")
+
+                output.append("\n**Итоговый мигрированный YAML:**")
+                output.append("```yaml")
+                output.append(migrated_content.strip())
+                output.append("```")
+
+                return "\n".join(output)
+
     except Exception as e:
-        error_msg = f"Критическая ошибка manage_device_config ({url}): {str(e)}"
+        error_msg = f"Критическая ошибка migrate_device_config ({url}): {str(e)}"
         logger.error(error_msg)
         return error_msg
 
