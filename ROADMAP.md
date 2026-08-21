@@ -162,7 +162,7 @@
 ---
 
 ### 3.3. Визуальный редактор и AST автоматизаций (`automations/*`)
-- [ ] **3.3.1. Инструменты работы с AST автоматизаций**
+- [x] ✅ **3.3.1. Инструменты работы с AST автоматизаций (`manage_automations`)**
   - **Команды API:** `automations/parse`, `automations/upsert`, `automations/delete`, `automations/get_available`, `automations/get_triggers`, `automations/get_actions`, `automations/get_conditions`.
   - **Описание:** Предоставление агенту интерфейса для чтения, валидации и точечной модификации блоков `on_*`, `interval`, `script` и эффектов подсветки без нарушения форматирования файла.
 
@@ -186,6 +186,7 @@
 
 | Дата | Версия | Описание изменений |
 | :--- | :---: | :--- |
+| **2026-08-21** | `1.10.0` | Реализован пункт 3.3: новый инструмент `manage_automations` для работы с AST автоматизаций ESPHome (parse, available, triggers, actions, conditions, upsert, delete с поддержкой dry-run и apply). |
 | **2026-08-21** | `1.9.0` | Реализован пункт 3.2: новый инструмент `manage_version_history` для Git-версионирования конфигураций (log, diff, show, deleted, restore с откатом через API ESPHome). |
 | **2026-08-21** | `1.8.0` | Реализован пункт 3.1: новый инструмент `troubleshoot_device` для глубокой сетевой диагностики устройств (DNS, mDNS, ICMP Ping RTT) и матриц доступности (`get_states`). Начата **Фаза 3 (P2)**. |
 | **2026-08-21** | `1.7.0` | Реализован пункт 2.4: новые инструменты `manage_labels` (CRUD глобального каталога меток) и `batch_manage_devices` (массовая архивация, удаление и назначение меток). Полностью завершена **Фаза 2 (P1)**. |

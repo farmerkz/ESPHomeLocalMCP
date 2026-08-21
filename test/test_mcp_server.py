@@ -26,6 +26,7 @@ from server import (
     batch_manage_devices,
     troubleshoot_device,
     manage_version_history,
+    manage_automations,
     compile_firmware,
     flash_ota,
     get_server_version
@@ -223,6 +224,18 @@ class TestMCPServerUnit(unittest.TestCase):
         self.assertIn("sha", sig_vh.parameters)
         self.assertEqual(sig_vh.parameters["sha"].default, "")
 
+        sig_auto = inspect.signature(manage_automations)
+        self.assertIn("action", sig_auto.parameters)
+        self.assertEqual(sig_auto.parameters["action"].default, "parse")
+        self.assertIn("configuration", sig_auto.parameters)
+        self.assertEqual(sig_auto.parameters["configuration"].default, "")
+        self.assertIn("component_id", sig_auto.parameters)
+        self.assertEqual(sig_auto.parameters["component_id"].default, "")
+        self.assertIn("trigger", sig_auto.parameters)
+        self.assertEqual(sig_auto.parameters["trigger"].default, "")
+        self.assertIn("apply", sig_auto.parameters)
+        self.assertEqual(sig_auto.parameters["apply"].default, False)
+
     def test_manage_device_config_validation(self):
         """Проверка локальной валидации аргументов в manage_device_config."""
         loop = asyncio.new_event_loop()
@@ -403,6 +416,36 @@ class TestMCPServerUnit(unittest.TestCase):
             # 4. Restore без sha
             res_no_res_sha = loop.run_until_complete(manage_version_history(action="restore", configuration="test.yaml"))
             self.assertIn("необходимо указать хэш коммита", res_no_res_sha)
+        finally:
+            loop.close()
+
+    def test_manage_automations_validation(self):
+        """Проверка локальной валидации аргументов в manage_automations."""
+        loop = asyncio.new_event_loop()
+        try:
+            # 1. Неизвестное действие
+            res_unknown = loop.run_until_complete(manage_automations(action="unknown_action"))
+            self.assertIn("неизвестное действие", res_unknown)
+
+            # 2. Parse без configuration
+            res_no_parse_cfg = loop.run_until_complete(manage_automations(action="parse"))
+            self.assertIn("необходимо указать параметр 'configuration'", res_no_parse_cfg)
+
+            # 3. Upsert без component_id
+            res_no_cid = loop.run_until_complete(manage_automations(action="upsert", configuration="test.yaml"))
+            self.assertIn("необходимо указать параметр 'component_id'", res_no_cid)
+
+            # 4. Upsert без trigger
+            res_no_trig = loop.run_until_complete(manage_automations(action="upsert", configuration="test.yaml", component_id="sw1"))
+            self.assertIn("необходимо указать параметр 'trigger'", res_no_trig)
+
+            # 5. Upsert без automation dict
+            res_no_auto = loop.run_until_complete(manage_automations(action="upsert", configuration="test.yaml", component_id="sw1", trigger="on_turn_on"))
+            self.assertIn("необходимо указать словарь 'automation'", res_no_auto)
+
+            # 6. Delete без trigger
+            res_del_no_trig = loop.run_until_complete(manage_automations(action="delete", configuration="test.yaml", component_id="sw1"))
+            self.assertIn("необходимо указать параметр 'trigger'", res_del_no_trig)
         finally:
             loop.close()
 
@@ -1006,6 +1049,118 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
 
         finally:
             # 7. Teardown Guard: удаление временного файла
+            await manage_device_config(action="delete", configuration=cfg)
+            print(f"  ✅ Teardown: временный файл {cfg} удален.")
+
+    async def test_manage_automations_catalogs(self):
+        """Тестирование каталогов триггеров, действий и условий (triggers, actions, conditions)."""
+        print("\n⚡ Запуск тестов manage_automations (каталоги triggers, actions, conditions)...")
+
+        # 1. triggers
+        res_trig = await manage_automations(action="triggers", query="button")
+        self.assertIn("Каталог триггеров автоматизаций ESPHome", res_trig)
+        self.assertIn("button.", res_trig)
+        print("  - manage_automations (triggers): каталог успешно получен")
+
+        # 2. actions
+        res_act = await manage_automations(action="actions", query="logger")
+        self.assertIn("Каталог действий (Actions) ESPHome", res_act)
+        self.assertIn("logger.", res_act)
+        print("  - manage_automations (actions): каталог успешно получен")
+
+        # 3. conditions
+        res_cond = await manage_automations(action="conditions", query="switch")
+        self.assertIn("Каталог условий (Conditions) ESPHome", res_cond)
+        self.assertIn("switch.", res_cond)
+        print("  - manage_automations (conditions): каталог успешно получен")
+
+    async def test_manage_automations_parse_available(self):
+        """Тестирование разбора AST и доступных сущностей (available, parse)."""
+        print("\n📋 Запуск тестов manage_automations (available, parse)...")
+
+        # 1. available test.yaml
+        res_avail = await manage_automations(action="available", configuration="test.yaml")
+        self.assertIn("Доступные сущности для автоматизаций в `test.yaml`", res_avail)
+        self.assertIn("test_zabbix_alert", res_avail)
+        print("  - manage_automations (available test.yaml): сущности получены")
+
+        # 2. parse test.yaml
+        res_parse = await manage_automations(action="parse", configuration="test.yaml")
+        self.assertIn("Автоматизации устройства `test.yaml`", res_parse)
+        self.assertIn("on_press", res_parse)
+        print("  - manage_automations (parse test.yaml): AST дерево успешно разобрано")
+
+    async def test_manage_automations_mutation_lifecycle(self):
+        """Тестирование жизненного цикла точечной модификации AST автоматизаций (upsert/delete) с Teardown Guard."""
+        print("\n🔧 Запуск теста жизненного цикла manage_automations (upsert, dry-run, apply, delete)...")
+        uid = uuid.uuid4().hex[:6]
+        cfg = f"mcp-auto-{uid}.yaml"
+        init_yaml = f"esphome:\n  name: mcp-auto-{uid}\nesp32:\n  board: esp32dev\n\nswitch:\n  - platform: gpio\n    pin: GPIO2\n    id: test_switch\n    name: 'Test Switch'\n"
+
+        # 1. Создаем устройство
+        await manage_device_config(action="create", configuration=cfg, content=init_yaml)
+
+        try:
+            # 2. Dry-Run Upsert
+            automation_payload = {
+                "trigger_id": "switch.on_turn_on",
+                "trigger_params": {},
+                "actions": [
+                    {
+                        "action_id": "logger.log",
+                        "params": {"format": "Switch Turned ON!"},
+                        "conditions": []
+                    }
+                ]
+            }
+            res_dry = await manage_automations(
+                action="upsert",
+                configuration=cfg,
+                component_id="test_switch",
+                trigger="on_turn_on",
+                automation=automation_payload,
+                apply=False
+            )
+            self.assertIn("Предпросмотр вставки автоматизации", res_dry)
+            self.assertIn("on_turn_on:", res_dry)
+            print("  - manage_automations (upsert dry-run): diff рассчитан успешно")
+
+            # 3. Apply Upsert
+            res_apply = await manage_automations(
+                action="upsert",
+                configuration=cfg,
+                component_id="test_switch",
+                trigger="on_turn_on",
+                automation=automation_payload,
+                apply=True
+            )
+            self.assertIn("Автоматизация успешно добавлена", res_apply)
+            print("  - manage_automations (upsert apply=True): автоматизация вставлена в YAML")
+
+            # 4. Parse (проверяем, что AST распознает новую автоматизацию)
+            res_parsed = await manage_automations(action="parse", configuration=cfg)
+            self.assertIn("найдено: 1", res_parsed)
+            self.assertIn("on_turn_on", res_parsed)
+            print("  - manage_automations (parse): автоматизация успешно валидирована в AST")
+
+            # 5. Delete (apply=True)
+            res_delete = await manage_automations(
+                action="delete",
+                configuration=cfg,
+                component_id="test_switch",
+                trigger="on_turn_on",
+                apply=True
+            )
+            self.assertIn("успешно удалена", res_delete)
+            print("  - manage_automations (delete apply=True): автоматизация удалена из YAML")
+
+            # 6. Parse после удаления
+            res_after_del = await manage_automations(action="parse", configuration=cfg)
+            self.assertIn("не обнаружено объявленных блоков", res_after_del)
+            print("  - manage_automations (parse after delete): подтверждено отсутствие автоматизаций")
+
+        finally:
+            # 7. Teardown Guard
             await manage_device_config(action="delete", configuration=cfg)
             print(f"  ✅ Teardown: временный файл {cfg} удален.")
 

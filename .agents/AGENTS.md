@@ -32,7 +32,7 @@
 
 ---
 
-## 🛠 Доступные MCP Инструменты (24 инструмента)
+## 🛠 Доступные MCP Инструменты (25 инструментов)
 
 1. **Базовые операции (Compile & Flash):**
    - `validate_yaml(configuration, host, port)` — быстрая валидация YAML (`devices/validate`)
@@ -47,9 +47,10 @@
    - `search_yaml_configs(query, context_lines, case_sensitive, host, port)` — поиск подстроки по всем YAML-конфигурациям (`yaml/search`)
    - `troubleshoot_device(configuration, action, host, port)` — глубокая сетевая диагностика доступности узла (DNS, mDNS, ICMP Ping RTT) и матриц статусов (`devices/troubleshoot`, `devices/get_states`)
 
-3. **Управление конфигурациями, секретами, метками, платами и сборками (P1):**
+3. **Управление конфигурациями, секретами, метками, AST автоматизациями, платами и сборками (P1/P2):**
    - `manage_device_config(action, configuration, content, new_name, board_id, friendly_name, ssid, psk, config_only, overwrite, allow_wipe, host, port)` — CRUD операций с YAML, генерация по шаблону платы, secrets, офлайн/онлайн переименование (`devices/*`)
    - `migrate_device_config(configuration, content, apply, host, port)` — автоматическая миграция устаревшего YAML синтаксиса ESPHome (`editor/migrate_config`)
+   - `manage_automations(action, configuration, component_id, trigger, kind, automation, apply, query, host, port)` — управление AST автоматизаций ESPHome: парсинг логики (`parse`), доступные сущности (`available`), каталоги триггеров/действий/условий, точечное добавление (`upsert`) и удаление (`delete`) блоков с поддержкой dry-run и apply (`automations/*`)
    - `search_components(action, query, category, platform, component_id, limit, offset, host, port)` — каталог и паспорта компонентов ESPHome (>940 записей), зависимости, шины, категории и режимы пинов (`components/*`)
    - `manage_secrets(action, key, value, ssid, psk, host, port)` — безопасное управление секретами (`secrets.yaml`), просмотр доступных ключей, запись секретов и настройка Wi-Fi (`config/*`)
    - `manage_labels(action, label_id, name, color, host, port)` — управление глобальным каталогом меток (тегов) парка устройств (`labels/*`)

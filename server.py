@@ -2664,6 +2664,344 @@ async def manage_version_history(
         return error_msg
 
 
+def apply_yaml_diff(content: str, diff: dict) -> str:
+    """
+    Применяет diff от сервера ESPHome (fromLine, toLine, replacement) к YAML-тексту.
+    Строки в diff 1-индексированы.
+    """
+    from_line = max(1, diff.get("fromLine", 1)) - 1  # 1-based -> 0-based
+    to_line = max(0, diff.get("toLine", 0)) - 1
+    replacement = diff.get("replacement", "")
+
+    lines = content.splitlines(keepends=True)
+    if to_line < from_line:
+        # Вставка перед from_line
+        new_lines = lines[:from_line] + [replacement] + lines[from_line:]
+    else:
+        # Замена диапазона [from_line, to_line]
+        new_lines = lines[:from_line] + [replacement] + lines[to_line + 1:]
+    return "".join(new_lines)
+
+
+@mcp.tool()
+async def manage_automations(
+    action: str = "parse",
+    configuration: str = "",
+    component_id: str = "",
+    trigger: str = "",
+    kind: str = "component_on",
+    automation: dict | None = None,
+    apply: bool = False,
+    query: str = "",
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
+) -> str:
+    """
+    Инструмент 25 (P2): Управление AST автоматизаций ESPHome (визуальный редактор логики).
+
+    Позволяет агенту инспектировать, парсить, валидировать, создавать, модифицировать
+    и удалять блоки автоматизаций (on_press, on_turn_on, on_state, interval, script и др.)
+    с точечной вставкой в YAML-файл без нарушения структуры и форматирования остального кода.
+
+    Параметр action поддерживает:
+      - "parse"       — разбор и вывод всех автоматизаций устройства в виде AST дерева (automations/parse).
+                        Требует: configuration.
+      - "available"   — список доступных сущностей, триггеров и действий для устройства (automations/get_available).
+                        Требует: configuration.
+      - "triggers"    — глобальный каталог доступных триггеров ESPHome (automations/get_triggers).
+                        Опционально: query (фильтр по имени/домену).
+      - "actions"     — глобальный каталог доступных действий ESPHome (automations/get_actions).
+                        Опционально: query (фильтр по имени/домену).
+      - "conditions"  — глобальный каталог доступных условий ESPHome (automations/get_conditions).
+                        Опционально: query (фильтр по имени/домену).
+      - "upsert"      — точечное добавление или обновление блока автоматизации в YAML-файле (automations/upsert).
+                        Требует: configuration, component_id, trigger, automation (структура триггера и действий).
+                        Опционально: kind ("component_on" по умолчанию), apply (True для автоматического сохранения).
+      - "delete"      — точечное удаление блока автоматизации из YAML-файла (automations/delete).
+                        Требует: configuration, component_id, trigger.
+                        Опционально: kind ("component_on" по умолчанию), apply (True для автоматического сохранения).
+
+    Параметры:
+      - action:        режим работы ("parse", "available", "triggers", "actions", "conditions", "upsert", "delete")
+      - configuration: имя YAML-файла устройства (например "test.yaml")
+      - component_id:  ID сущности/компонента (например "relay_switch", "test_button")
+      - trigger:       имя триггера (например "on_turn_on", "on_press", "on_value")
+      - kind:          тип обработчика ("component_on" по умолчанию, "interval", "script" и др.)
+      - automation:    словарь описания автоматизации (trigger_id, actions, trigger_params)
+      - apply:         флаг автоматического применения diff в файл конфигурации (по умолчанию False)
+      - query:         поисковый фильтр для каталогов triggers/actions/conditions
+      - host:          хост сервера ESPHome
+      - port:          сетевой порт WebSocket API ESPHome
+    """
+    url = get_ws_url(host, port)
+    msg_id = "automations_tool_1"
+    action = action.strip().lower()
+
+    valid_actions = ("parse", "available", "triggers", "actions", "conditions", "upsert", "delete")
+    if action not in valid_actions:
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: parse, available, triggers, actions, conditions, upsert, delete."
+
+    cfg_clean = resolve_configuration(configuration) if configuration else ""
+
+    if action in ("parse", "available") and not cfg_clean:
+        return f"Ошибка: для действия '{action}' необходимо указать параметр 'configuration' (YAML-файл устройства)."
+
+    if action == "upsert":
+        if not cfg_clean:
+            return "Ошибка: для действия 'upsert' необходимо указать параметр 'configuration' (YAML-файл устройства)."
+        if not component_id.strip():
+            return "Ошибка: для действия 'upsert' необходимо указать параметр 'component_id' (ID компонента/сущности)."
+        if not trigger.strip():
+            return "Ошибка: для действия 'upsert' необходимо указать параметр 'trigger' (имя триггера, например 'on_turn_on')."
+        if not automation or not isinstance(automation, dict):
+            return "Ошибка: для действия 'upsert' необходимо указать словарь 'automation' с описанием триггера и действий."
+
+    if action == "delete":
+        if not cfg_clean:
+            return "Ошибка: для действия 'delete' необходимо указать параметр 'configuration' (YAML-файл устройства)."
+        if not component_id.strip():
+            return "Ошибка: для действия 'delete' необходимо указать параметр 'component_id' (ID компонента/сущности)."
+        if not trigger.strip():
+            return "Ошибка: для действия 'delete' необходимо указать параметр 'trigger' (имя триггера, например 'on_turn_on')."
+
+    logger.info(f"manage_automations: action={action!r}, configuration={cfg_clean!r}, component_id={component_id!r}")
+
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
+
+            if action == "triggers":
+                await ws.send(json.dumps({"command": "automations/get_triggers", "message_id": msg_id, "args": {}}))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка получения триггеров: {data.get('details', data)}"
+                items = data.get("result", []) or []
+                if query:
+                    q = query.strip().lower()
+                    items = [it for it in items if q in it.get("id", "").lower() or q in it.get("name", "").lower() or q in it.get("domain", "").lower()]
+
+                output = [f"### ⚡ Каталог триггеров автоматизаций ESPHome ({len(items)} шт.):\n"]
+                for it in items[:50]:
+                    t_id = it.get("id", "")
+                    name = it.get("name", "")
+                    domain = it.get("domain", "")
+                    desc = it.get("description", "")
+                    output.append(f"- **`{t_id}`** ({name}, домен: `{domain}`): {desc}")
+                return "\n".join(output)
+
+            elif action == "actions":
+                await ws.send(json.dumps({"command": "automations/get_actions", "message_id": msg_id, "args": {}}))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка получения действий: {data.get('details', data)}"
+                items = data.get("result", []) or []
+                if query:
+                    q = query.strip().lower()
+                    items = [it for it in items if q in it.get("id", "").lower() or q in it.get("name", "").lower() or q in it.get("domain", "").lower()]
+
+                output = [f"### 🎬 Каталог действий (Actions) ESPHome ({len(items)} шт.):\n"]
+                for it in items[:50]:
+                    a_id = it.get("id", "")
+                    name = it.get("name", "")
+                    domain = it.get("domain", "")
+                    desc = it.get("description", "")
+                    output.append(f"- **`{a_id}`** ({name}, домен: `{domain}`): {desc}")
+                return "\n".join(output)
+
+            elif action == "conditions":
+                await ws.send(json.dumps({"command": "automations/get_conditions", "message_id": msg_id, "args": {}}))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка получения условий: {data.get('details', data)}"
+                items = data.get("result", []) or []
+                if query:
+                    q = query.strip().lower()
+                    items = [it for it in items if q in it.get("id", "").lower() or q in it.get("name", "").lower() or q in it.get("domain", "").lower()]
+
+                output = [f"### ❓ Каталог условий (Conditions) ESPHome ({len(items)} шт.):\n"]
+                for it in items[:50]:
+                    c_id = it.get("id", "")
+                    name = it.get("name", "")
+                    domain = it.get("domain", "")
+                    desc = it.get("description", "")
+                    output.append(f"- **`{c_id}`** ({name}, домен: `{domain}`): {desc}")
+                return "\n".join(output)
+
+            elif action == "available":
+                await ws.send(json.dumps({"command": "automations/get_available", "message_id": msg_id, "args": {"configuration": cfg_clean}}))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка получения доступных компонентов ({cfg_clean}): {data.get('details', data)}"
+                res = data.get("result", {}) or {}
+                devs = res.get("devices", [])
+                scripts = res.get("scripts", [])
+
+                output = [f"### 📋 Доступные сущности для автоматизаций в `{cfg_clean}`:\n"]
+                output.append(f"**Сущности / Компоненты ({len(devs)}):**")
+                for d in devs:
+                    d_id = d.get("id", "")
+                    cid = d.get("component_id", "")
+                    name = d.get("name") or d.get("title") or "N/A"
+                    output.append(f"- ID: **`{d_id}`** | Тип: `{cid}` | Имя: *{name}*")
+
+                if scripts:
+                    output.append(f"\n**Скрипты ({len(scripts)}):**")
+                    for s in scripts:
+                        output.append(f"- `{s}`")
+
+                return "\n".join(output)
+
+            elif action == "parse":
+                await ws.send(json.dumps({"command": "automations/parse", "message_id": msg_id, "args": {"configuration": cfg_clean}}))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка парсинга автоматизаций ({cfg_clean}): {data.get('details', data)}"
+                items = data.get("result", []) or []
+                if not items:
+                    return f"В конфигурации `{cfg_clean}` не обнаружено объявленных блоков автоматизаций."
+
+                output = [f"### ⚡ Автоматизации устройства `{cfg_clean}` (найдено: {len(items)}):\n"]
+                for i, item in enumerate(items, 1):
+                    lbl = item.get("label", "Автоматизация")
+                    loc = item.get("location", {})
+                    f_line = item.get("from_line", "?")
+                    t_line = item.get("to_line", "?")
+                    auto = item.get("automation", {})
+                    trig_id = auto.get("trigger_id", "N/A")
+                    actions_list = auto.get("actions", [])
+                    raw_yaml = item.get("raw_yaml", "").strip()
+
+                    output.append(f"#### {i}. {lbl} (строки {f_line}-{t_line}):")
+                    output.append(f"- **Компонент:** `{loc.get('component_id', 'N/A')}` (триггер: `{loc.get('trigger', 'N/A')}`, kind: `{loc.get('kind', 'N/A')}`)")
+                    output.append(f"- **Тип триггера:** `{trig_id}`")
+                    output.append(f"- **Количество действий:** {len(actions_list)}")
+                    if actions_list:
+                        for a in actions_list:
+                            output.append(f"  - `{a.get('action_id', 'N/A')}`: {a.get('params', {})}")
+                    if raw_yaml:
+                        output.append(f"\n```yaml\n{raw_yaml}\n```\n")
+
+                return "\n".join(output)
+
+            elif action == "upsert":
+                location_dict = {
+                    "component_id": component_id.strip(),
+                    "trigger": trigger.strip(),
+                    "kind": kind.strip() or "component_on"
+                }
+                await ws.send(json.dumps({
+                    "command": "automations/upsert",
+                    "message_id": msg_id,
+                    "args": {
+                        "configuration": cfg_clean,
+                        "location": location_dict,
+                        "automation": automation
+                    }
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка добавления автоматизации upsert ({cfg_clean}): {data.get('details', data)}"
+
+                res = data.get("result", {}) or {}
+                diff = res.get("yaml_diff", {})
+                if not diff:
+                    return f"Сервер не сформировал изменений (diff) для автоматизации `{trigger}` компонента `{component_id}`."
+
+                diff_rep = diff.get("replacement", "").strip()
+
+                if not apply:
+                    return (
+                        f"### 🔍 Предпросмотр вставки автоматизации в `{cfg_clean}` (Dry-Run):\n\n"
+                        f"- **Компонент:** `{component_id}` | **Триггер:** `{trigger}`\n"
+                        f"- **Целевые строки:** {diff.get('fromLine')}-{diff.get('toLine')}\n\n"
+                        f"```yaml\n{diff_rep}\n```\n\n"
+                        f"💡 Для сохранения изменений передайте `apply=True`."
+                    )
+
+                # Получаем текущий конфиг
+                await ws.send(json.dumps({"command": "devices/get_config", "message_id": "cfg_get", "args": {"configuration": cfg_clean}}))
+                cfg_data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if cfg_data.get("error_code"):
+                    return f"Ошибка чтения конфигурации перед применением: {cfg_data.get('details', cfg_data)}"
+                raw_res = cfg_data.get("result", "")
+                curr_content = raw_res if isinstance(raw_res, str) else (raw_res.get("content", "") if isinstance(raw_res, dict) else "")
+
+                new_content = apply_yaml_diff(curr_content, diff)
+                await ws.send(json.dumps({
+                    "command": "devices/update_config",
+                    "message_id": "cfg_upd",
+                    "args": {"configuration": cfg_clean, "content": new_content}
+                }))
+                upd_data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if upd_data.get("error_code"):
+                    return f"Ошибка сохранения конфигурации с новой автоматизацией: {upd_data.get('details', upd_data)}"
+
+                return (
+                    f"### ⚡ Автоматизация успешно добавлена в `{cfg_clean}`!\n\n"
+                    f"- **Компонент:** `{component_id}` | **Триггер:** `{trigger}`\n"
+                    f"- **Вставленный YAML блок:**\n```yaml\n{diff_rep}\n```"
+                )
+
+            elif action == "delete":
+                location_dict = {
+                    "component_id": component_id.strip(),
+                    "trigger": trigger.strip(),
+                    "kind": kind.strip() or "component_on"
+                }
+                await ws.send(json.dumps({
+                    "command": "automations/delete",
+                    "message_id": msg_id,
+                    "args": {
+                        "configuration": cfg_clean,
+                        "location": location_dict
+                    }
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка удаления автоматизации ({cfg_clean}): {data.get('details', data)}"
+
+                res = data.get("result", {}) or {}
+                diff = res.get("yaml_diff", {})
+                if not diff:
+                    return f"Сервер не сформировал изменений (diff) для удаления автоматизации `{trigger}` компонента `{component_id}`."
+
+                if not apply:
+                    return (
+                        f"### 🔍 Предпросмотр удаления автоматизации из `{cfg_clean}` (Dry-Run):\n\n"
+                        f"- **Компонент:** `{component_id}` | **Триггер:** `{trigger}`\n"
+                        f"- **Удаляемые строки:** {diff.get('fromLine')}-{diff.get('toLine')}\n\n"
+                        f"💡 Для сохранения изменений передайте `apply=True`."
+                    )
+
+                # Получаем текущий конфиг
+                await ws.send(json.dumps({"command": "devices/get_config", "message_id": "cfg_get", "args": {"configuration": cfg_clean}}))
+                cfg_data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if cfg_data.get("error_code"):
+                    return f"Ошибка чтения конфигурации перед удалением: {cfg_data.get('details', cfg_data)}"
+                raw_res = cfg_data.get("result", "")
+                curr_content = raw_res if isinstance(raw_res, str) else (raw_res.get("content", "") if isinstance(raw_res, dict) else "")
+
+                new_content = apply_yaml_diff(curr_content, diff)
+                await ws.send(json.dumps({
+                    "command": "devices/update_config",
+                    "message_id": "cfg_upd",
+                    "args": {"configuration": cfg_clean, "content": new_content}
+                }))
+                upd_data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if upd_data.get("error_code"):
+                    return f"Ошибка сохранения конфигурации после удаления: {upd_data.get('details', upd_data)}"
+
+                return f"### 🗑 Автоматизация `{trigger}` компонента `{component_id}` успешно удалена из `{cfg_clean}`!"
+
+    except Exception as e:
+        error_msg = f"Критическая ошибка manage_automations ({url}): {str(e)}"
+        logger.error(error_msg)
+        return error_msg
+
+
 @mcp.tool()
 async def authenticate_esphome(
     username: str = "",
