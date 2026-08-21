@@ -18,7 +18,10 @@
   - Добавлен новый инструмент `manage_remote_build(action, enabled, cleanup_ttl_seconds, hostname, target_port, pairing_key, peer_id, host, port)` для управления кластерной сборкой и разгрузкой компиляции (Remote Build / Offloading, `remote_build/*` API).
   - Поддержка чтения конфигурации и списка пиров (`action="get_settings"`), динамического изменения параметров и TTL очистки сборок (`action="set_settings"`), предварительной проверки сопряжения с получением SHA-256 fingerprint публичного ключа (`action="preview_pair"`), отправки запроса на сопряжение (`action="request_pair"`), а также одобрения, разрыва сопряжения и удаления узлов (`action="approve_peer"`, `"unpair"`, `"remove_peer"`).
   - Добавлены модульные тесты сигнатуры и валидации, а также интеграционные тесты жизненного цикла параметров с Teardown Guard.
-  - **Полностью завершена Фаза 3 (P2) Дорожной карты!**
+- **Полностью завершена Фаза 3 (P2) Дорожной карты!**
+- **Документация для AI-агентов и интеграции в проекты:**
+  - Создано исчерпывающее руководство для AI-агентов [`docs/ESPHOME_AGENT_GUIDE.md`](docs/ESPHOME_AGENT_GUIDE.md) с описанием 6 золотых правил, 7 типовых сценариев и каталогом всех 27 инструментов.
+  - Создана подробная инструкция для пользователя [`docs/USER_INTEGRATION_GUIDE.md`](docs/USER_INTEGRATION_GUIDE.md) по подключению инструкций к Cursor, Antigravity, VS Code Copilot, Claude Desktop, Windsurf, Aider.
 
 ---
 ## [1.11.0] - 2026-08-21

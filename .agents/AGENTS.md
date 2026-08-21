@@ -21,6 +21,13 @@
 
 ---
 
+## 🤖 Документация для агентов и руководство по интеграции
+
+- **Руководство для AI-агентов:** [`docs/ESPHOME_AGENT_GUIDE.md`](file:///Users/andreyzolotnitskiy/Documents/github/ESPHomeLocalMCP/docs/ESPHOME_AGENT_GUIDE.md) — Золотые правила, 7 сценариев взаимодействия и справочник 27 инструментов.
+- **Инструкция по интеграции в проекты:** [`docs/USER_INTEGRATION_GUIDE.md`](file:///Users/andreyzolotnitskiy/Documents/github/ESPHomeLocalMCP/docs/USER_INTEGRATION_GUIDE.md) — Подключение к Cursor, Antigravity, VS Code Copilot, Claude Desktop, Windsurf, Aider.
+
+---
+
 ## 🏗 Архитектура сервера и ключевые технологии
 
 - **Транспорт:** `stdio` (стандартный ввод-вывод) — стандарт для локальных MCP-серверов.

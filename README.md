@@ -251,6 +251,13 @@ gemini mcp add esphome-local -- /ПОЛНЫЙ/ПУТЬ/К/ESPHomeLocalMCP/.venv/
 .venv/bin/python -u server.py 2>mcp_debug.log
 ```
 
+## 🤖 Инструкции для AI-агентов и интеграция в проекты
+
+Для эффективной работы AI-ассистентов (Cursor, Antigravity, VS Code Copilot, Claude Desktop, Windsurf, Aider) в проектах разработки и управления устройствами ESPHome подготовлены специализированные руководства:
+
+- [**`docs/ESPHOME_AGENT_GUIDE.md`**](docs/ESPHOME_AGENT_GUIDE.md) — **Инструкция для AI-агентов**: Золотые правила разработки, 7 типовых сценариев (создание с нуля, AST-автоматизации, сборка, расшифровка сбоев, работа с секретами) и полный справочник 27 инструментов.
+- [**`docs/USER_INTEGRATION_GUIDE.md`**](docs/USER_INTEGRATION_GUIDE.md) — **Руководство пользователя по интеграции**: Пошаговые примеры подключения файла инструкций к проектам для различных AI IDE (`.agents/rules/`, `.cursorrules`, `.cursor/rules/*.mdc`, `.github/copilot-instructions.md`, `CLAUDE.md`, `.windsurfrules`).
+
 ## 🗺 Дорожная карта развития (Roadmap)
 
 Подробный план развития сервера, перечень задач по интеграции новых возможностей ESPHome Device Builder API и трекер статусов реализации доступны в файле [**`ROADMAP.md`**](ROADMAP.md).
