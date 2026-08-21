@@ -1,6 +1,6 @@
 # ESPHome Local MCP Server
 
-[![Version](https://img.shields.io/badge/version-1.10.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.11.0-blue.svg)](CHANGELOG.md)
 [![SemVer 2.0.0](https://img.shields.io/badge/SemVer-2.0.0-green.svg)](https://semver.org/)
 [![Documentation](https://img.shields.io/badge/docs-API.md-orange.svg)](https://github.com/esphome/device-builder/blob/main/docs/API.md)
 
@@ -24,7 +24,7 @@
 
 ## 🛠 Доступные MCP Инструменты
 
-Сервер предоставляет **25 инструментов** для AI-агентов, разбитых на 4 группы. Каждая команда поддерживает опциональное переопределение `host` и `port` (`api_port`).
+Сервер предоставляет **26 инструментов** для AI-агентов, разбитых на 4 группы. Каждая команда поддерживает опциональное переопределение `host` и `port` (`api_port`).
 
 ---
 
@@ -73,11 +73,12 @@
 | # | Инструмент | API-команды | Описание |
 |---|-----------|-------------|----------|
 | 20 | `batch_compile_and_flash(configurations, action, port, force_local, bootloader, host, api_port)` | `firmware/compile_bulk`, `firmware/install_bulk` | Пакетная компиляция и/или OTA/Serial-прошивка группы устройств; поддерживает отложенные обновления (deferred install) для оффлайн-устройств, флаги `force_local` и `bootloader` |
-| 21 | `archive_devices(action, configuration, host, port)` | `devices/archive`, `devices/unarchive`, `devices/list_archived`, `devices/delete_archived` | Мягкое удаление устройств в архив (обратимо), восстановление и просмотр архива |
-| 22 | `manage_device_labels(configuration, label_ids, host, port)` | `devices/set_labels` | Установка/удаление меток (тегов) одного конкретного устройства |
-| 23 | `manage_version_history(action, configuration, sha, sha_compare, max_count, config_dir, host, port)` | Git CLI / `devices/*` | История изменений конфигураций (Git Version History): просмотр коммитов (`log`), изменений (`diff`), содержимого ревизии (`show`), удаленных файлов (`deleted`) и безопасный откат (`restore`) через API |
-| 24 | `authenticate_esphome(username, password, token, host, port)` | `auth/login` | Аутентификация на ESPHome-серверах, защищённых паролем (`requires_auth=true`) |
-| 25 | `get_server_version()` | internal / SSOT | Получение информации о версии MCP-сервера (SemVer), протоколе и среде |
+| 21 | `get_firmware_binaries(configuration, action, file, save_path, host, port)` | `firmware/get_binaries`, `firmware/download_token` | Инспекция артефактов прошивки (`list`), генерация одноразовых токенов скачивания (`token`) и прямое скачивание бинарников на диск хоста (`download`) через HTTP |
+| 22 | `archive_devices(action, configuration, host, port)` | `devices/archive`, `devices/unarchive`, `devices/list_archived`, `devices/delete_archived` | Мягкое удаление устройств в архив (обратимо), восстановление и просмотр архива |
+| 23 | `manage_device_labels(configuration, label_ids, host, port)` | `devices/set_labels` | Установка/удаление меток (тегов) одного конкретного устройства |
+| 24 | `manage_version_history(action, configuration, sha, sha_compare, max_count, config_dir, host, port)` | Git CLI / `devices/*` | История изменений конфигураций (Git Version History): просмотр коммитов (`log`), изменений (`diff`), содержимого ревизии (`show`), удаленных файлов (`deleted`) и безопасный откат (`restore`) через API |
+| 25 | `authenticate_esphome(username, password, token, host, port)` | `auth/login` | Аутентификация на ESPHome-серверах, защищённых паролем (`requires_auth=true`) |
+| 26 | `get_server_version()` | internal / SSOT | Получение информации о версии MCP-сервера (SemVer), протоколе и среде |
 
 ---
 

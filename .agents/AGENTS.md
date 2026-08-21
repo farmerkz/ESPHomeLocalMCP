@@ -32,7 +32,7 @@
 
 ---
 
-## 🛠 Доступные MCP Инструменты (25 инструментов)
+## 🛠 Доступные MCP Инструменты (26 инструментов)
 
 1. **Базовые операции (Compile & Flash):**
    - `validate_yaml(configuration, host, port)` — быстрая валидация YAML (`devices/validate`)
@@ -61,6 +61,7 @@
 
 4. **Пакетные операции сборки, архивация, Git-история, безопасность и версия (P2):**
    - `batch_compile_and_flash(configurations, action, port, force_local, bootloader, host, api_port)` — пакетная компиляция и прошивка (`firmware/*_bulk`)
+   - `get_firmware_binaries(configuration, action, file, save_path, host, port)` — инспекция артефактов прошивки (`list`), генерация токенов скачивания (`token`) и скачивание бинарников (`download`) через HTTP
    - `archive_devices(action, configuration, host, port)` — архивация и восстановление устройств (`devices/*_archived`)
    - `manage_device_labels(configuration, label_ids, host, port)` — управление метками одного устройства (`devices/set_labels`)
    - `manage_version_history(action, configuration, sha, sha_compare, max_count, config_dir, host, port)` — просмотр истории Git-коммитов (`log`), изменений (`diff`), ревизий (`show`), удаленных файлов (`deleted`) и откат (`restore`)

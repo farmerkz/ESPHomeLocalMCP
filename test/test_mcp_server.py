@@ -27,6 +27,7 @@ from server import (
     troubleshoot_device,
     manage_version_history,
     manage_automations,
+    get_firmware_binaries,
     compile_firmware,
     flash_ota,
     get_server_version
@@ -235,6 +236,15 @@ class TestMCPServerUnit(unittest.TestCase):
         self.assertEqual(sig_auto.parameters["trigger"].default, "")
         self.assertIn("apply", sig_auto.parameters)
         self.assertEqual(sig_auto.parameters["apply"].default, False)
+
+        sig_bin = inspect.signature(get_firmware_binaries)
+        self.assertIn("configuration", sig_bin.parameters)
+        self.assertIn("action", sig_bin.parameters)
+        self.assertEqual(sig_bin.parameters["action"].default, "list")
+        self.assertIn("file", sig_bin.parameters)
+        self.assertEqual(sig_bin.parameters["file"].default, "")
+        self.assertIn("save_path", sig_bin.parameters)
+        self.assertEqual(sig_bin.parameters["save_path"].default, "")
 
     def test_manage_device_config_validation(self):
         """Проверка локальной валидации аргументов в manage_device_config."""
@@ -446,6 +456,28 @@ class TestMCPServerUnit(unittest.TestCase):
             # 6. Delete без trigger
             res_del_no_trig = loop.run_until_complete(manage_automations(action="delete", configuration="test.yaml", component_id="sw1"))
             self.assertIn("необходимо указать параметр 'trigger'", res_del_no_trig)
+        finally:
+            loop.close()
+
+    def test_get_firmware_binaries_validation(self):
+        """Проверка локальной валидации аргументов в get_firmware_binaries."""
+        loop = asyncio.new_event_loop()
+        try:
+            # 1. Без configuration
+            res_no_cfg = loop.run_until_complete(get_firmware_binaries(configuration=""))
+            self.assertIn("обязателен для работы с артефактами", res_no_cfg)
+
+            # 2. Неизвестное действие
+            res_unknown = loop.run_until_complete(get_firmware_binaries(configuration="test.yaml", action="unknown_action"))
+            self.assertIn("неизвестное действие", res_unknown)
+
+            # 3. Token без file
+            res_no_tok_file = loop.run_until_complete(get_firmware_binaries(configuration="test.yaml", action="token", file=""))
+            self.assertIn("необходимо указать параметр 'file'", res_no_tok_file)
+
+            # 4. Download без file
+            res_no_down_file = loop.run_until_complete(get_firmware_binaries(configuration="test.yaml", action="download", file=""))
+            self.assertIn("необходимо указать параметр 'file'", res_no_down_file)
         finally:
             loop.close()
 
@@ -1163,6 +1195,57 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
             # 7. Teardown Guard
             await manage_device_config(action="delete", configuration=cfg)
             print(f"  ✅ Teardown: временный файл {cfg} удален.")
+
+    async def test_get_firmware_binaries_list_and_token(self):
+        """Тестирование получения списка бинарных артефактов и выпуска токенов (list, token)."""
+        print("\n📦 Запуск тестов get_firmware_binaries (list, token)...")
+
+        # 1. list для test.yaml
+        res_list = await get_firmware_binaries(configuration="test.yaml", action="list")
+        self.assertIn("Скомпилированные артефакты прошивки для `test.yaml`", res_list)
+        self.assertIn("firmware.factory.bin", res_list)
+        print("  - get_firmware_binaries (list test.yaml): список артефактов успешно получен")
+
+        # 2. token для test.yaml (firmware.factory.bin)
+        res_tok = await get_firmware_binaries(
+            configuration="test.yaml",
+            action="token",
+            file="firmware.factory.bin"
+        )
+        self.assertIn("Токен и ссылка для скачивания `test-firmware.factory.bin`", res_tok)
+        self.assertIn("/api/firmware/download?token=", res_tok)
+        print("  - get_firmware_binaries (token test.yaml): токен и ссылка сгенерированы успешно")
+
+    async def test_get_firmware_binaries_download_lifecycle(self):
+        """Тестирование скачивания бинарного артефакта на диск (download) с Teardown Guard."""
+        print("\n📥 Запуск теста жизненного цикла get_firmware_binaries (download)...")
+        tmp_download_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "scratch", f"test_fw_{uuid.uuid4().hex[:6]}.factory.bin")
+        )
+
+        try:
+            # 1. Скачиваем бинарник
+            res_down = await get_firmware_binaries(
+                configuration="test.yaml",
+                action="download",
+                file="firmware.factory.bin",
+                save_path=tmp_download_path
+            )
+            self.assertIn("Артефакт прошивки успешно скачан", res_down)
+            self.assertIn("SHA-256", res_down)
+            print("  - get_firmware_binaries (download test.yaml): бинарник успешно скачан через HTTP")
+
+            # 2. Проверяем файл на диске
+            self.assertTrue(os.path.exists(tmp_download_path))
+            file_size = os.path.getsize(tmp_download_path)
+            self.assertGreater(file_size, 100 * 1024)  # > 100 KB
+            print(f"  - Проверка файла на диске: размер {file_size:,} байт — подтвержден")
+
+        finally:
+            # 3. Teardown Guard: удаление скачанного тестового файла
+            if os.path.exists(tmp_download_path):
+                os.remove(tmp_download_path)
+                print(f"  ✅ Teardown: временный бинарный файл {tmp_download_path} удален.")
 
 
 if __name__ == "__main__":

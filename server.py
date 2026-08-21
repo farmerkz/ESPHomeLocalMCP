@@ -8,6 +8,8 @@ import re
 import os
 import subprocess
 import uuid
+import hashlib
+import urllib.request
 from __version__ import __version__, __version_info__
 
 try:
@@ -136,6 +138,23 @@ def get_ws_url(host: str | None = None, port: int | None = None, ssl: bool | Non
 
     scheme = "wss" if use_ssl else "ws"
     return f"{scheme}://{h}:{p}/ws"
+
+def get_http_url(host: str | None = None, port: int | None = None, ssl: bool | None = None) -> str:
+    """
+    Формирует базовый HTTP/HTTPS URL подключения к ESPHome API.
+    """
+    h = host if host else DEFAULT_HOST
+    p = port if port is not None else DEFAULT_PORT
+
+    if ssl is not None:
+        use_ssl = ssl
+    elif DEFAULT_SSL is not None:
+        use_ssl = DEFAULT_SSL
+    else:
+        use_ssl = p in (443, 8443)
+
+    scheme = "https" if use_ssl else "http"
+    return f"{scheme}://{h}:{p}"
 
 # Инициализация MCP сервера
 mcp = FastMCP("esphome-device-builder")
@@ -2998,6 +3017,154 @@ async def manage_automations(
 
     except Exception as e:
         error_msg = f"Критическая ошибка manage_automations ({url}): {str(e)}"
+        logger.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def get_firmware_binaries(
+    configuration: str,
+    action: str = "list",
+    file: str = "",
+    save_path: str = "",
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
+) -> str:
+    """
+    Инструмент 26 (P2): Экспорт и скачивание скомпилированных артефактов прошивки (firmware/*).
+
+    Позволяет получать список готовых бинарных артефактов (factory.bin, ota.bin, firmware.elf),
+    генерировать временные одноразовые токены и скачивать бинарники на диск хоста.
+
+    Параметр action поддерживает:
+      - "list"     — получение списка всех доступных скомпилированных артефактов на диске (firmware/get_binaries).
+      - "token"    — генерация одноразового токена и ссылки для скачивания конкретного файла (firmware/download_token).
+                     Требует: file (например 'firmware.factory.bin' или 'firmware.ota.bin').
+      - "download" — скачивание бинарного файла через HTTP эндпоинт (/api/firmware/download) и сохранение в save_path.
+                     Требует: file. Если save_path не указан, файл сохраняется в текущую директорию под оригинальным именем.
+
+    Параметры:
+      - configuration: имя YAML-файла устройства (например "test.yaml")
+      - action:        режим работы ("list", "token", "download", по умолчанию "list")
+      - file:          имя целевого файла артефакта (например "firmware.factory.bin", "firmware.ota.bin", "firmware.elf")
+      - save_path:     локальный путь для сохранения бинарника при action="download" (опционально)
+      - host:          хост сервера ESPHome
+      - port:          сетевой порт WebSocket/HTTP API ESPHome
+    """
+    if not configuration or not configuration.strip():
+        return "Ошибка: параметр 'configuration' обязателен для работы с артефактами прошивки."
+
+    action = action.strip().lower()
+    valid_actions = ("list", "token", "download")
+    if action not in valid_actions:
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: list, token, download."
+
+    if action in ("token", "download") and not file.strip():
+        return f"Ошибка: для действия '{action}' необходимо указать параметр 'file' (например 'firmware.factory.bin' или 'firmware.ota.bin')."
+
+    cfg_clean = resolve_configuration(configuration)
+    url = get_ws_url(host, port)
+    http_base = get_http_url(host, port)
+    msg_id = "binaries_tool_1"
+
+    logger.info(f"get_firmware_binaries: action={action!r}, configuration={cfg_clean!r}, file={file!r}")
+
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
+
+            if action == "list":
+                await ws.send(json.dumps({
+                    "command": "firmware/get_binaries",
+                    "message_id": msg_id,
+                    "args": {"configuration": cfg_clean}
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка получения списка артефактов ({cfg_clean}): {data.get('details', data)}"
+
+                items = data.get("result", []) or []
+                if not items:
+                    return f"📦 Для устройства `{cfg_clean}` не найдено скомпилированных бинарных файлов на диске. Сначала выполните компиляцию (`compile_firmware`)."
+
+                output = [f"### 📦 Скомпилированные артефакты прошивки для `{cfg_clean}` ({len(items)} шт.):\n"]
+                for it in items:
+                    f_name = it.get("file", "")
+                    title = it.get("title", "")
+                    b_type = it.get("type", "bin")
+                    desc = it.get("description", "")
+                    output.append(f"- **`{f_name}`** (тип: `{b_type}`): **{title}**")
+                    if desc:
+                        output.append(f"  *{desc}*")
+
+                output.append("\n💡 Для скачивания файла используйте `action='token'` (получение ссылки) или `action='download'` (сохранение на диск).")
+                return "\n".join(output)
+
+            elif action in ("token", "download"):
+                target_file = file.strip()
+                await ws.send(json.dumps({
+                    "command": "firmware/download_token",
+                    "message_id": msg_id,
+                    "args": {"configuration": cfg_clean, "file": target_file}
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка выпуска токена для скачивания `{target_file}` ({cfg_clean}): {data.get('details', data)}"
+
+                res = data.get("result", {}) or {}
+                token = res.get("token", "")
+                filename = res.get("filename") or target_file
+                if not token:
+                    return f"Ошибка: сервер не вернул токен для скачивания `{target_file}`."
+
+                download_url = f"{http_base}/api/firmware/download?token={token}"
+
+                if action == "token":
+                    return (
+                        f"### 🔑 Токен и ссылка для скачивания `{filename}`:\n\n"
+                        f"- **Имя файла:** `{filename}`\n"
+                        f"- **Токен авторизации:** `{token}`\n"
+                        f"- **Ссылка для скачивания (HTTP GET):**\n"
+                        f"  [{download_url}]({download_url})\n\n"
+                        f"⏱ *Токен одноразовый и действителен в течение ~60 секунд.*"
+                    )
+
+                elif action == "download":
+                    # Выполняем HTTP GET загрузку
+                    dest_path = save_path.strip() if save_path.strip() else os.path.join(os.getcwd(), filename)
+                    dest_dir = os.path.dirname(os.path.abspath(dest_path))
+                    if dest_dir and not os.path.exists(dest_dir):
+                        os.makedirs(dest_dir, exist_ok=True)
+
+                    req = urllib.request.Request(download_url)
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        binary_data = resp.read()
+
+                    with open(dest_path, "wb") as f:
+                        f.write(binary_data)
+
+                    file_size = len(binary_data)
+                    sha256_hash = hashlib.sha256(binary_data).hexdigest()
+
+                    size_str = f"{file_size:,} байт"
+                    if file_size > 1024 * 1024:
+                        size_str += f" ({file_size / (1024 * 1024):.2f} МБ)"
+                    elif file_size > 1024:
+                        size_str += f" ({file_size / 1024:.2f} КБ)"
+
+                    return (
+                        f"### 📥 Артефакт прошивки успешно скачан!\n\n"
+                        f"- **Файл:** `{filename}`\n"
+                        f"- **Сохранен в:** `{os.path.abspath(dest_path)}`\n"
+                        f"- **Размер:** {size_str}\n"
+                        f"- **SHA-256:** `{sha256_hash}`"
+                    )
+
+    except Exception as e:
+        error_msg = f"Критическая ошибка get_firmware_binaries ({url}): {str(e)}"
         logger.error(error_msg)
         return error_msg
 
