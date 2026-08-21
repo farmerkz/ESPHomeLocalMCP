@@ -32,7 +32,7 @@
 
 ---
 
-## 🛠 Доступные MCP Инструменты (15 инструментов)
+## 🛠 Доступные MCP Инструменты (16 инструментов)
 
 1. **Базовые операции (Compile & Flash):**
    - `validate_yaml(configuration, host, port)` — быстрая валидация YAML (`devices/validate`)
@@ -51,11 +51,12 @@
    - `get_board_info(action, board_id, platform, query, limit, host, port)` — информация о платах и их совместимости (`boards/*`)
    - `manage_build_jobs(action, configuration, job_id, status_filter, host, port)` — управление очередью компиляции и кэшем (`firmware/*`)
 
-4. **Пакетные операции, архивация и безопасность (P2):**
+4. **Пакетные операции, архивация, безопасность и версия (P2):**
    - `batch_compile_and_flash(configurations, action, port, host, api_port)` — пакетная компиляция и прошивка (`firmware/*_bulk`)
    - `archive_devices(action, configuration, host, port)` — архивация и восстановление устройств (`devices/*_archived`)
    - `manage_device_labels(configuration, label_ids, host, port)` — управление метками устройств (`devices/set_labels`)
    - `authenticate_esphome(username, password, token, host, port)` — аутентификация по паролю/токену (`auth/login`)
+   - `get_server_version()` — получение информации о версии сервера и протоколе (SemVer)
 
 ---
 
@@ -117,3 +118,19 @@
 - `boards/get_board` — структура пинов: поля `gpio`, `label`, `features[]`, `notes`, `available` (`false` = занят SPI Flash и т.д.).
 - `firmware/compile_bulk`, `firmware/install_bulk` — возвращают массив `[FirmwareJob]` немедленно; статус отслеживается через `firmware/follow_job`.
 - `devices/create` — возвращает **реальное** имя созданного файла в `result.configuration`. ESPHome может slugify имя (убирать спецсимволы), всегда используйте значение из ответа API.
+
+---
+
+## 🔖 Версионирование проекта (SemVer & Changelog)
+
+Проект строго придерживается стандарта **[Semantic Versioning 2.0.0](https://semver.org/lang/ru/)**:
+- **Single Source of Truth:** файл [`__version__.py`](file:///Users/andreyzolotnitskiy/Documents/github/ESPHomeLocalMCP/__version__.py) (`__version__ = "X.Y.Z"`).
+- **Правила изменения версии:**
+  - `MAJOR` (X.0.0) — обратно-несовместимые изменения сигнатур инструментов или формата ответа.
+  - `MINOR` (1.X.0) — добавление новых инструментов, параметров или возможностей без нарушения совместимости.
+  - `PATCH` (1.0.X) — исправление ошибок, оптимизация или обновление документации.
+- **Журнал изменений:** все изменения обязательно фиксируются в [`CHANGELOG.md`](file:///Users/andreyzolotnitskiy/Documents/github/ESPHomeLocalMCP/CHANGELOG.md) в секции `[Unreleased]`.
+- **Скрипт бампа:** для автоматического обновления версий, README, CHANGELOG и git-тегов используйте:
+  `.venv/bin/python3 scripts/bump_version.py patch|minor|major`
+
+

@@ -7,6 +7,7 @@ import logging
 import re
 import os
 import uuid
+from __version__ import __version__, __version_info__
 
 try:
     import tomllib
@@ -137,6 +138,8 @@ def get_ws_url(host: str | None = None, port: int | None = None, ssl: bool | Non
 
 # Инициализация MCP сервера
 mcp = FastMCP("esphome-device-builder")
+mcp._version = __version__
+logger.info(f"ESPHome Local MCP Server v{__version__} инициализирован")
 
 def clean_ansi(text: str) -> str:
     text = re.sub(r'\\(?:033|x1b|e)', '\x1b', text)
@@ -1375,8 +1378,23 @@ async def authenticate_esphome(
     except Exception as e:
         error_msg = f"Критическая ошибка authenticate_esphome ({url}): {str(e)}"
         logger.error(error_msg)
-        return error_msg
+@mcp.tool()
+async def get_server_version() -> str:
+    """
+    Инструмент 16: Получение информации о версии MCP-сервера и протоколе.
+
+    Возвращает текущую версию сервера (SemVer), статус компонентов и базовую конфигурацию.
+    """
+    return (
+        f"### ESPHome Local MCP Server\n"
+        f"- **Версия сервера:** `v{__version__}`\n"
+        f"- **Стандарт версионирования:** Semantic Versioning 2.0.0 (SemVer)\n"
+        f"- **Хост по умолчанию:** `{DEFAULT_HOST}:{DEFAULT_PORT}`\n"
+        f"- **Транспорт:** stdio\n"
+        f"- **Количество инструментов:** 16"
+    )
 
 if __name__ == "__main__":
+    logger.info(f"Запуск ESPHome Local MCP Server v{__version__} (stdio)...")
     mcp.run(transport='stdio')
 

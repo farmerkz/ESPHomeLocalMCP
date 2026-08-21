@@ -2,11 +2,13 @@ import unittest
 import asyncio
 import json
 import os
+import re
 import sys
 
 # Добавляем родительскую директорию в sys.path для импорта server
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from __version__ import __version__, __version_info__
 from server import (
     resolve_configuration,
     validate_yaml,
@@ -15,15 +17,31 @@ from server import (
     get_board_info,
     manage_device_config,
     compile_firmware,
-    flash_ota
+    flash_ota,
+    get_server_version
 )
 
 MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "test_devices.json")
+CHANGELOG_PATH = os.path.join(os.path.dirname(__file__), "..", "CHANGELOG.md")
 
 class TestMCPServerUnit(unittest.TestCase):
     """
     Модульные тесты внутренней логики MCP-сервера.
     """
+
+    def test_version_semver_format(self):
+        """Проверка соответствия __version__ стандарту SemVer 2.0.0."""
+        semver_regex = r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[a-zA-Z0-9.-]+)?(?:\+[a-zA-Z0-9.-]+)?$"
+        self.assertRegex(__version__, semver_regex, f"__version__ '{__version__}' не соответствует SemVer")
+        self.assertIsInstance(__version_info__, tuple)
+        self.assertGreaterEqual(len(__version_info__), 3)
+
+    def test_version_in_changelog(self):
+        """Проверка наличия текущей версии в CHANGELOG.md."""
+        self.assertTrue(os.path.isfile(CHANGELOG_PATH), "Файл CHANGELOG.md не найден")
+        with open(CHANGELOG_PATH, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn(f"[{__version__}]", content, f"Версия {__version__} не найдена в CHANGELOG.md")
 
     def test_resolve_configuration_simple(self):
         self.assertEqual(resolve_configuration("test.yaml"), "test.yaml")
@@ -38,6 +56,17 @@ class TestMCPServerUnit(unittest.TestCase):
         dummy_path = "/non_existent_directory_12345/dummy.yaml"
         res = resolve_configuration(dummy_path)
         self.assertEqual(res, dummy_path)
+
+    def test_get_server_version_output(self):
+        """Тест вызова инструмента get_server_version."""
+        loop = asyncio.new_event_loop()
+        try:
+            res = loop.run_until_complete(get_server_version())
+            self.assertIn(f"v{__version__}", res)
+            self.assertIn("Semantic Versioning 2.0.0", res)
+            self.assertIn("16", res)
+        finally:
+            loop.close()
 
 
 class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):

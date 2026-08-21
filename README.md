@@ -1,5 +1,9 @@
 # ESPHome Local MCP Server
 
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
+[![SemVer 2.0.0](https://img.shields.io/badge/SemVer-2.0.0-green.svg)](https://semver.org/)
+[![Documentation](https://img.shields.io/badge/docs-API.md-orange.svg)](https://github.com/esphome/device-builder/blob/main/docs/API.md)
+
 Локальный сервер протокола MCP (Model Context Protocol) для интеграции **ESPHome Device Builder** с AI-ассистентами (Cursor, VS Code Copilot, Claude Desktop, Gemini CLI, Antigravity).
 
 Позволяет языковым моделям (LLM) автономно управлять всем жизненным циклом устройств ESPHome: валидировать конфигурации, компилировать и прошивать (OTA) прошивки, читать runtime-логи, расшифровывать дампы паники, производить поиск по всем конфигурациям, управлять платами, задачами сборки, архивом устройств и правами доступа — напрямую через WebSocket API ESPHome Device Builder.
@@ -16,10 +20,11 @@
   - `config/mcp-test.yaml` — автоматически обрезает префикс `config/`
 - **Гарантированная OTA-прошивка:** Инструменты установки явно используют параметр `port: "OTA"` для прошивки «по воздуху».
 - **Проверка авторизации:** Сервер корректно определяет флаг `requires_auth` и предупредит агента, если ESPHome защищён паролем.
+- **Семантическое версионирование (SemVer):** Встроенное отслеживание версий, журнал изменений [`CHANGELOG.md`](CHANGELOG.md) и инструмент `get_server_version`.
 
 ## 🛠 Доступные MCP Инструменты
 
-Сервер предоставляет **15 инструментов** для AI-агентов, разбитых на 4 группы. Каждая команда поддерживает опциональное переопределение `host` и `port` (`api_port`).
+Сервер предоставляет **16 инструментов** для AI-агентов, разбитых на 4 группы. Каждая команда поддерживает опциональное переопределение `host` и `port` (`api_port`).
 
 ---
 
@@ -55,7 +60,7 @@
 
 ---
 
-### Группа 4: Пакетные Операции, Архивация и Безопасность (P2)
+### Группа 4: Пакетные Операции, Архивация, Безопасность и Версии (P2)
 
 | # | Инструмент | API-команды | Описание |
 |---|-----------|-------------|----------|
@@ -63,6 +68,7 @@
 | 13 | `archive_devices(action, configuration, host, port)` | `devices/archive`, `devices/unarchive`, `devices/list_archived`, `devices/delete_archived` | Мягкое удаление устройств в архив (обратимо), восстановление и просмотр архива |
 | 14 | `manage_device_labels(configuration, label_ids, host, port)` | `devices/set_labels` | Установка/удаление меток (тегов) устройств для организации парка |
 | 15 | `authenticate_esphome(username, password, token, host, port)` | `auth/login` | Аутентификация на ESPHome-серверах, защищённых паролем (`requires_auth=true`) |
+| 16 | `get_server_version()` | internal / SSOT | Получение информации о версии MCP-сервера (SemVer), протоколе и среде |
 
 ---
 
@@ -223,9 +229,32 @@ gemini mcp add esphome-local -- /ПОЛНЫЙ/ПУТЬ/К/ESPHomeLocalMCP/.venv/
 .venv/bin/python -u server.py 2>mcp_debug.log
 ```
 
+## 🗺 Дорожная карта развития (Roadmap)
+
+Подробный план развития сервера, перечень задач по интеграции новых возможностей ESPHome Device Builder API и трекер статусов реализации доступны в файле [**`ROADMAP.md`**](ROADMAP.md).
+
+## 🔖 Версионирование и релизы
+
+Проект следует стандарту [Semantic Versioning 2.0.0](https://semver.org/lang/ru/) и ведет журнал изменений в [**`CHANGELOG.md`**](CHANGELOG.md).
+
+Для повышения версии проекта используется встроенный скрипт:
+
+```bash
+# Повышение patch-версии (1.0.0 -> 1.0.1)
+.venv/bin/python3 scripts/bump_version.py patch
+
+# Повышение minor-версии (1.0.0 -> 1.1.0)
+.venv/bin/python3 scripts/bump_version.py minor
+
+# Просмотр изменений без применения (dry-run)
+.venv/bin/python3 scripts/bump_version.py patch --dry-run
+```
+
 ## 📦 Зависимости
 
 Зависимости перечислены в `requirements.txt`:
 - `mcp` — официальный Python SDK для Model Context Protocol
 - `websockets` — асинхронная работа с WebSocket-соединениями
 - `tomllib` / `tomli` — модуль для парсинга TOML конфигураций из `.env`
+
+
