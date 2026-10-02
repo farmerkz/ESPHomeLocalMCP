@@ -490,7 +490,8 @@ async def list_devices(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> st
 
 @mcp.tool()
 async def stream_device_logs(configuration: str, port: str = "OTA", duration_seconds: int = 10,
-                               lines_count: int = 50, host: str = DEFAULT_HOST, api_port: int = DEFAULT_PORT) -> str:
+                               lines_count: int = 50, no_states: bool = False,
+                               host: str = DEFAULT_HOST, api_port: int = DEFAULT_PORT) -> str:
     """
     Инструмент 6 (P0): Чтение и вывод логов работы устройства в реальном времени.
     
@@ -499,6 +500,9 @@ async def stream_device_logs(configuration: str, port: str = "OTA", duration_sec
       - port: "OTA" (по умолчанию) или serial-порт (/dev/ttyUSB0, COM3 и т.д.)
       - duration_seconds: продолжительность сбора логов в секундах (1-60, по умолчанию 10)
       - lines_count: максимальное количество собираемых строк (по умолчанию 50)
+      - no_states: подавление событий изменения состояний для снижения шума (по умолчанию False)
+      - host: хост сервера ESPHome
+      - api_port: сетевой порт WebSocket API ESPHome
     """
     config_name = resolve_configuration(configuration)
     duration_seconds = max(1, min(60, duration_seconds))
@@ -508,7 +512,7 @@ async def stream_device_logs(configuration: str, port: str = "OTA", duration_sec
     msg_id = "logs_stream_1"
     output_log = []
     
-    logger.info(f"Подключение к {url} для чтения логов {config_name} (порт: {port}, время: {duration_seconds}s)...")
+    logger.info(f"Подключение к {url} для чтения логов {config_name} (порт: {port}, время: {duration_seconds}s, no_states={no_states})...")
     
     try:
         async with websockets.connect(url, ping_interval=None) as ws:
@@ -517,10 +521,14 @@ async def stream_device_logs(configuration: str, port: str = "OTA", duration_sec
             if first_msg.get("requires_auth"):
                 return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
             
+            logs_args = {"configuration": config_name, "port": port}
+            if no_states:
+                logs_args["no_states"] = True
+
             await ws.send(json.dumps({
                 "command": "devices/logs",
                 "message_id": msg_id,
-                "args": {"configuration": config_name, "port": port}
+                "args": logs_args
             }))
             
             start_time = asyncio.get_event_loop().time()
@@ -713,56 +721,85 @@ async def manage_device_config(
     new_name: str = "",
     board_id: str = "",
     friendly_name: str = "",
+    comment: str = "",
     ssid: str = "",
     psk: str = "",
     config_only: bool = True,
     overwrite: bool = True,
     allow_wipe: bool = False,
+    expected: str = "",
+    component_id: str = "",
+    fields: dict | None = None,
+    sub_entities: list | dict | None = None,
+    apply: bool = False,
+    project_name: str = "",
+    ignore_device: bool = True,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT
 ) -> str:
     """
-    Инструмент 9 (P1): Управление конфигурацией устройств ESPHome через API.
+    Инструмент 9 (P1/P2): Управление конфигурацией устройств ESPHome через API.
 
     Параметр action поддерживает следующие действия:
-      - "get"    — прочитать содержимое YAML-конфигурации устройства
-      - "update" — записать новое содержимое YAML-конфигурации (требует content)
-      - "create" — создать новую конфигурацию устройства:
-                   - по готовому YAML (параметр content)
-                   - или по шаблону платы (параметр board_id, опционально friendly_name, ssid, psk)
-      - "rename" — переименовать конфигурацию (требует new_name):
-                   - config_only=True (по умолчанию) — офлайн переименование файлов на диске
-                   - config_only=False — онлайн двухшаговый процесс (сборка -> OTA-прошивка -> переименование)
-      - "delete" — удалить конфигурацию и связанные файлы
+      - "get"           — прочитать содержимое YAML-конфигурации устройства
+      - "update"        — записать новое содержимое YAML-конфигурации (требует content, опционально expected для CAS)
+      - "create"        — создать новую конфигурацию устройства:
+                          - по готовому YAML (параметр content)
+                          - или по шаблону платы (параметр board_id, опционально friendly_name, ssid, psk)
+      - "rename"        — переименовать конфигурацию (требует new_name):
+                          - config_only=True (по умолчанию) — офлайн переименование файлов на диске
+                          - config_only=False — онлайн двухшаговый процесс (сборка -> OTA-прошивка -> переименование)
+      - "delete"        — удалить конфигурацию и связанные файлы
+      - "key"           — получить единый ключ шифрования Native API / OTA для устройства (devices/get_encryption_key)
+      - "add_component" — прямое добавление компонента в конфигурацию устройства (devices/add_component):
+                          - apply=False (по умолчанию) — режим предпросмотра (dry-run) без сохранения на диск
+                          - apply=True — атомарное добавление и сохранение в файл на диске
+      - "metadata"      — обновление метаданных sidecar JSON устройства без изменения YAML (devices/update):
+                          поддерживает friendly_name, comment, board_id
+      - "import"        — импорт/принятие обнаруженного устройства в реестр ESPHome (devices/import)
+      - "ignore"        — скрытие или восстановление видимости устройства в дашборде (devices/ignore)
 
     Параметры:
-      - configuration: имя файла ("test.yaml") или относительный путь ("config/test.yaml")
-      - content: содержимое YAML для действий "update" или "create"
-      - new_name: новое имя для действия "rename"
-      - board_id: ID платы для создания по шаблону (например "esp32dev", "d1_mini", "nodemcuv2")
-      - friendly_name: понятное имя устройства (например "Датчик климата")
-      - ssid: имя Wi-Fi сети (сохраняется в secrets.yaml с использованием !secret)
-      - psk: пароль Wi-Fi сети
-      - config_only: переименование только файлов конфигурации (True) или с онлайн OTA-прошивкой (False)
-      - overwrite: перезаписывать ли существующий файл при создании
-      - allow_wipe: разрешить перезапись при действии "update"
-      - host: хост сервера ESPHome
-      - port: сетевой порт WebSocket API ESPHome
+      - configuration:  имя файла ("test.yaml") или относительный путь ("config/test.yaml")
+      - content:        содержимое YAML для действий "update" или "create"
+      - new_name:       новое имя для действия "rename"
+      - board_id:       ID платы для создания по шаблону (например "esp32dev", "d1_mini", "nodemcuv2") или для "metadata"
+      - friendly_name:  понятное имя устройства (например "Датчик климата")
+      - comment:        пользовательский комментарий/заметка к устройству для действия "metadata"
+      - ssid:           имя Wi-Fi сети (сохраняется в secrets.yaml с использованием !secret)
+      - psk:            пароль Wi-Fi сети
+      - config_only:    переименование только файлов конфигурации (True) или с онлайн OTA-прошивкой (False)
+      - overwrite:      перезаписывать ли существующий файл при создании
+      - allow_wipe:     разрешить перезапись при действии "update"
+      - expected:       ожидаемое текущее содержимое файла (Compare-and-Swap защита при действии "update")
+      - component_id:   идентификатор компонента для "add_component" (например "sensor.bme280_i2c", "wifi")
+      - fields:         словарь полей компонента для "add_component"
+      - sub_entities:   вложенные сущности компонента для "add_component"
+      - apply:          применить ли добавление компонента на диск (для "add_component")
+      - project_name:   имя проекта для действия "import"
+      - ignore_device:  флаг скрытия устройства (True — скрыть, False — восстановить видимость) для действия "ignore"
+      - host:           хост сервера ESPHome
+      - port:           сетевой порт WebSocket API ESPHome
     """
     url = get_ws_url(host, port)
     msg_id = "manage_cfg_1"
 
     command_map = {
-        "get":    "devices/get_config",
-        "update": "devices/update_config",
-        "create": "devices/create",
-        "rename": "devices/rename",
-        "delete": "devices/delete",
+        "get":           "devices/get_config",
+        "update":        "devices/update_config",
+        "create":        "devices/create",
+        "rename":        "devices/rename",
+        "delete":        "devices/delete",
+        "key":           "devices/get_encryption_key",
+        "add_component": "devices/add_component",
+        "metadata":      "devices/update",
+        "import":        "devices/import",
+        "ignore":        "devices/ignore",
     }
 
     action = action.strip().lower()
     if action not in command_map:
-        return f"Ошибка: неизвестное действие '{action}'. Допустимые: get, update, create, rename, delete."
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: get, update, create, rename, delete, key, add_component, metadata, import, ignore."
 
     command = command_map[action]
     config_name = resolve_configuration(configuration)
@@ -774,6 +811,8 @@ async def manage_device_config(
         if not content:
             return "Ошибка: для действия 'update' необходимо указать параметр content."
         args = {"configuration": config_name, "content": content, "allow_wipe": allow_wipe}
+        if expected:
+            args["expected"] = expected
     elif action == "create":
         name = config_name.removesuffix(".yaml")
         args = {"name": name, "overwrite": overwrite}
@@ -803,6 +842,35 @@ async def manage_device_config(
         }
     elif action == "delete":
         args = {"configuration": config_name}
+    elif action == "key":
+        args = {"configuration": config_name}
+    elif action == "metadata":
+        args = {"configuration": config_name}
+        if friendly_name:
+            args["friendly_name"] = friendly_name
+        if comment:
+            args["comment"] = comment
+        if board_id:
+            args["board_id"] = board_id
+    elif action == "import":
+        dev_name = config_name.removesuffix(".yaml")
+        args = {"name": dev_name}
+        if project_name:
+            args["project_name"] = project_name
+    elif action == "ignore":
+        dev_name = config_name.removesuffix(".yaml")
+        args = {"name": dev_name, "ignore": ignore_device}
+    elif action == "add_component":
+        if not component_id:
+            return "Ошибка: для действия 'add_component' необходимо указать параметр component_id."
+        args = {
+            "configuration": config_name,
+            "component_id": component_id.strip()
+        }
+        if fields and isinstance(fields, dict):
+            args["fields"] = fields
+        if sub_entities is not None:
+            args["sub_entities"] = sub_entities
 
     logger.info(f"manage_device_config: action={action!r}, configuration={config_name!r}")
     try:
@@ -811,6 +879,19 @@ async def manage_device_config(
             first_msg = json.loads(first_msg_raw)
             if first_msg.get("requires_auth"):
                 return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
+
+            # Для add_component в режиме dry-run (apply=False) сначала считываем текущий YAML
+            if action == "add_component" and not apply:
+                get_cfg_id = "add_comp_get_cfg_1"
+                await ws.send(json.dumps({
+                    "command": "devices/get_config",
+                    "message_id": get_cfg_id,
+                    "args": {"configuration": config_name}
+                }))
+                cur_cfg_resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+                if cur_cfg_resp.get("error_code"):
+                    return f"Ошибка чтения конфигурации перед добавлением компонента: {cur_cfg_resp.get('details', cur_cfg_resp)}"
+                args["yaml"] = cur_cfg_resp.get("result", "")
 
             await ws.send(json.dumps({
                 "command": command,
@@ -838,6 +919,28 @@ async def manage_device_config(
                 elif action == "create":
                     real_name = (result or {}).get("configuration", f"{args['name']}.yaml")
                     return f"✅ Конфигурация создана: `{real_name}`"
+
+                elif action == "key":
+                    enc_key = (result or {}).get("key", "") if isinstance(result, dict) else str(result or "")
+                    if not enc_key:
+                        return f"ℹ️ Ключ шифрования (API/OTA encryption key) для устройства `{config_name}` не настроен или не найден."
+                    return (
+                        f"### 🔑 Ключ шифрования устройства `{config_name}`:\n\n"
+                        f"```\n{enc_key}\n```\n\n"
+                        f"> [!NOTE]\n"
+                        f"> Данный ключ используется для безопасного подключения через ESPHome Native API и шифрования OTA-прошивки."
+                    )
+
+                elif action == "add_component":
+                    updated_yaml = (result or {}).get("yaml", "") if isinstance(result, dict) else ""
+                    if not apply:
+                        return (
+                            f"### 🔍 Предпросмотр добавления компонента `{component_id}` в `{config_name}` (Dry-run):\n\n"
+                            f"```yaml\n{updated_yaml}\n```\n\n"
+                            f"> [!TIP]\n"
+                            f"> Для применения изменений на диске вызовите `manage_device_config(action=\"add_component\", configuration=\"{config_name}\", component_id=\"{component_id}\", apply=True)`."
+                        )
+                    return f"✅ Компонент `{component_id}` успешно добавлен в конфигурацию `{config_name}` и сохранен на диске."
 
                 elif action == "rename":
                     # Проверяем, запущена ли двухшаговая задача прошивки (при config_only=False)
@@ -874,6 +977,31 @@ async def manage_device_config(
 
                     new_cfg = (result or {}).get("configuration", f"{new_name_clean}.yaml") if isinstance(result, dict) else f"{new_name_clean}.yaml"
                     return f"✅ Конфигурация `{config_name}` успешно переименована в `{new_cfg}`."
+
+                elif action == "metadata":
+                    res_dict = result if isinstance(result, dict) else {}
+                    r_friendly = res_dict.get("friendly_name") or friendly_name or "N/A"
+                    r_comment = res_dict.get("comment") or comment or "—"
+                    r_board = res_dict.get("board_id") or board_id or "—"
+                    return (
+                        f"### 📝 Метаданные устройства `{config_name}` успешно обновлены (devices/update):\n\n"
+                        f"- **Отображаемое имя (friendly_name):** `{r_friendly}`\n"
+                        f"- **Комментарий (comment):** `{r_comment}`\n"
+                        f"- **ID платы (board_id):** `{r_board}`"
+                    )
+
+                elif action == "import":
+                    res_dict = result if isinstance(result, dict) else {}
+                    imported_cfg = res_dict.get("configuration", f"{config_name}")
+                    warning = res_dict.get("warning")
+                    out = [f"### 📥 Устройство успешно импортировано в реестр ESPHome (devices/import):\n\n- **Файл конфигурации:** `{imported_cfg}`"]
+                    if warning:
+                        out.append(f"\n- ⚠️ **Предупреждение:** {warning}")
+                    return "".join(out)
+
+                elif action == "ignore":
+                    status_str = "скрыто из дашборда" if ignore_device else "восстановлено в дашборде"
+                    return f"### 👁️ Устройство `{config_name}` успешно {status_str} (devices/ignore)."
 
                 elif action == "delete":
                     return f"✅ Конфигурация `{config_name}` и связанные файлы удалены."
@@ -1051,6 +1179,7 @@ async def search_components(
     category: str = "",
     platform: str = "",
     component_id: str = "",
+    board_id: str = "",
     limit: int = 20,
     offset: int = 0,
     host: str = DEFAULT_HOST,
@@ -1060,11 +1189,12 @@ async def search_components(
     Инструмент 18 (P1): Поиск и исследование каталога компонентов ESPHome (>940 компонентов).
 
     Позволяет агенту находить компоненты, датчики, дисплеи и приводы, узнавать их зависимости
-    (i2c, spi, uart), ограничения шин, ссылки на документацию и поддерживаемые режимы GPIO.
+    (i2c, spi, uart), ограничения шин, ссылки на документацию, подробную схему настроек
+    (config_entries) и поддерживаемые режимы GPIO.
 
     Параметр action поддерживает:
       - "search"     — поиск компонентов по query, категории, платформе с пагинацией
-      - "get"        — подробная информация о конкретном компоненте (требует component_id или query)
+      - "get"        — подробный паспорт компонента со схемой параметров (components/get_component_bodies)
       - "categories" — список всех категорий компонентов ESPHome с количеством записей
       - "pin_modes"  — справочник поддерживаемых режимов пинов для GPIO-расширителей
 
@@ -1073,6 +1203,7 @@ async def search_components(
       - category:     фильтр по категории (например "sensor", "display", "light", "climate")
       - platform:     фильтр по платформе чипа (например "esp32", "rp2040")
       - component_id: точный ID компонента для action="get" (например "sensor.bme280_i2c")
+      - board_id:     ID платы для контекстной фильтрации компонентов (опционально)
       - limit:        максимальное количество результатов (по умолчанию 20)
       - offset:       смещение для пагинации (по умолчанию 0)
       - host:         хост сервера ESPHome
@@ -1100,15 +1231,23 @@ async def search_components(
             args["category"] = category
         if platform:
             args["platform"] = platform
+        if board_id:
+            args["board_id"] = board_id
 
     elif action == "get":
         target_q = component_id or query
         command = "components/get_components"
         args = {"query": target_q, "limit": 10}
+        if platform:
+            args["platform"] = platform
+        if board_id:
+            args["board_id"] = board_id
 
     elif action == "categories":
         command = "components/get_categories"
         args = {}
+        if board_id:
+            args["board_id"] = board_id
 
     elif action == "pin_modes":
         command = "components/get_pin_registry_modes"
@@ -1185,6 +1324,28 @@ async def search_components(
                     provides = matched.get("provides", []) or []
                     multi_conf = matched.get("multi_conf", True)
 
+                    # Запрашиваем расширенную схему настроек через components/get_component_bodies
+                    body_entries = []
+                    try:
+                        body_args: dict = {"component_ids": [cid]}
+                        if platform:
+                            body_args["platform"] = platform
+                        if board_id:
+                            body_args["board_id"] = board_id
+
+                        await ws.send(json.dumps({
+                            "command": "components/get_component_bodies",
+                            "message_id": "comp_bodies_1",
+                            "args": body_args
+                        }))
+                        body_msg_raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                        body_msg = json.loads(body_msg_raw)
+                        body_res = body_msg.get("result", {})
+                        if isinstance(body_res, dict) and cid in body_res:
+                            body_entries = body_res[cid].get("config_entries", [])
+                    except Exception as err:
+                        logger.warning(f"Не удалось получить тело компонента через get_component_bodies: {err}")
+
                     output = [f"### Компонент ESPHome: **{cname}** (`{cid}`)\n"]
                     output.append(f"- **Категория:** `{cat}`")
                     output.append(f"- **Несколько экземпляров (multi_conf):** {'Да' if multi_conf else 'Нет'}")
@@ -1208,6 +1369,22 @@ async def search_components(
                                     c_items.append(f"{k}={v}")
                             c_str = f" ({', '.join(c_items)})" if c_items else ""
                             output.append(f"  - `{bus_name}`{c_str}")
+
+                    if body_entries:
+                        output.append("\n**Схема параметров конфигурации (config_entries):**")
+                        for entry in body_entries:
+                            if not isinstance(entry, dict):
+                                continue
+                            e_key = entry.get("key", "")
+                            e_type = entry.get("type", "")
+                            e_label = entry.get("label", e_key)
+                            e_desc = entry.get("description", "").strip()
+                            e_def = entry.get("default_value")
+                            e_adv = entry.get("advanced", False)
+                            adv_str = " *(advanced)*" if e_adv else ""
+                            def_str = f" [по умолчанию: `{e_def}`]" if e_def is not None else ""
+                            desc_str = f" — {e_desc}" if e_desc else ""
+                            output.append(f"  - `{e_key}` (*{e_type}*): **{e_label}**{def_str}{adv_str}{desc_str}")
 
                     return "\n".join(output)
 
@@ -1246,6 +1423,7 @@ async def manage_secrets(
     value: str = "",
     ssid: str = "",
     psk: str = "",
+    overwrite: bool = True,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT
 ) -> str:
@@ -1266,12 +1444,13 @@ async def manage_secrets(
       - В логах параметры маскируются: value='***', psk='***'.
 
     Параметры:
-      - key:   имя ключа секрета (для action="set", например "mqtt_broker_password")
-      - value: значение секрета (для action="set")
-      - ssid:  имя сети Wi-Fi (для action="set_wifi")
-      - psk:   пароль сети Wi-Fi (для action="set_wifi")
-      - host:  хост сервера ESPHome
-      - port:  сетевой порт WebSocket API ESPHome
+      - key:       имя ключа секрета (для action="set", например "mqtt_broker_password")
+      - value:     значение секрета (для action="set")
+      - ssid:      имя сети Wi-Fi (для action="set_wifi")
+      - psk:       пароль сети Wi-Fi (для action="set_wifi")
+      - overwrite: разрешить перезапись существующего ключа при action="set" (False = create-if-absent, по умолчанию True)
+      - host:      хост сервера ESPHome
+      - port:      сетевой порт WebSocket API ESPHome
     """
     url = get_ws_url(host, port)
     msg_id = "secrets_tool_1"
@@ -1288,7 +1467,7 @@ async def manage_secrets(
         if not key or not value:
             return "Ошибка: для действия 'set' необходимо указать оба параметра: 'key' (имя ключа) и 'value' (значение)."
         command = "config/set_secret"
-        args = {"key": key, "value": value}
+        args = {"key": key, "value": value, "overwrite": overwrite}
     elif action == "set_wifi":
         if not ssid:
             return "Ошибка: для действия 'set_wifi' необходимо указать параметр 'ssid' (имя сети Wi-Fi)."
@@ -1350,27 +1529,35 @@ async def manage_secrets(
 @mcp.tool()
 async def get_host_info(
     action: str = "version",
+    preferences: dict | None = None,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT
 ) -> str:
     """
-    Инструмент 20 (P1): Информация о хосте ESPHome, версиях и подключенных USB-Serial портах.
+    Инструмент 20 (P1/P2): Информация о хосте ESPHome, версиях, портах и настройках дашборда.
 
     Параметр action поддерживает:
-      - "version"      — получение версии бэкенда Device Builder и ESPHome Core
-      - "serial_ports" — список обнаруженных физических USB-Serial адаптеров на хосте
-      - "all"          — полная сводка (версии + список Serial-портов)
+      - "version"         — получение версии бэкенда Device Builder и ESPHome Core (config/version)
+      - "serial_ports"    — список обнаруженных физических USB-Serial адаптеров на хосте (config/serial_ports)
+      - "preferences"     — получение настроек пользователя и интерфейса дашборда (config/get_preferences)
+      - "set_preferences" — частичное обновление настроек дашборда (config/set_preferences, требует preferences)
+      - "all"             — полная сводка (версии + список Serial-портов + настройки)
 
     Параметры:
-      - host: хост сервера ESPHome
-      - port: сетевой порт WebSocket API ESPHome
+      - action:      действие ("version", "serial_ports", "preferences", "set_preferences", "all")
+      - preferences: словарь настроек для "set_preferences" (theme, dashboard_view, version_history_enabled и др.)
+      - host:        хост сервера ESPHome
+      - port:        сетевой порт WebSocket API ESPHome
     """
     url = get_ws_url(host, port)
     action = action.strip().lower()
 
-    valid_actions = ("version", "serial_ports", "ports", "all")
+    valid_actions = ("version", "serial_ports", "ports", "preferences", "prefs", "set_preferences", "set_prefs", "all")
     if action not in valid_actions:
-        return f"Ошибка: неизвестное действие '{action}'. Допустимые: version, serial_ports, all."
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: version, serial_ports, preferences, set_preferences, all."
+
+    if action in ("set_preferences", "set_prefs") and (preferences is None or not isinstance(preferences, dict)):
+        return "Ошибка: для действия 'set_preferences' необходимо указать словарь параметров 'preferences' (например: {'theme': 'dark'})."
 
     logger.info(f"get_host_info: action={action!r}")
     try:
@@ -1382,6 +1569,7 @@ async def get_host_info(
 
             ver_data = {}
             ports_data = []
+            pref_data = {}
 
             # Запрашиваем version при необходимости
             if action in ("version", "all"):
@@ -1411,6 +1599,37 @@ async def get_host_info(
                         ports_data = d.get("result", [])
                         break
 
+            # Запрашиваем get_preferences
+            if action in ("preferences", "prefs", "all"):
+                pref_id = "host_pref_1"
+                await ws.send(json.dumps({
+                    "command": "config/get_preferences",
+                    "message_id": pref_id,
+                    "args": {}
+                }))
+                async for msg in ws:
+                    d = json.loads(msg)
+                    if d.get("message_id") == pref_id:
+                        pref_data = d.get("result", {})
+                        break
+
+            # Записываем set_preferences
+            if action in ("set_preferences", "set_prefs"):
+                set_pref_id = "host_set_pref_1"
+                await ws.send(json.dumps({
+                    "command": "config/set_preferences",
+                    "message_id": set_pref_id,
+                    "args": preferences or {}
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка сохранения настроек дашборда: {data.get('details', data)}"
+                updated_pref = data.get("result", {}) or {}
+                return (
+                    f"### ✅ Настройки дашборда ESPHome успешно обновлены (config/set_preferences):\n\n"
+                    f"```json\n{json.dumps(updated_pref, indent=2, ensure_ascii=False)}\n```"
+                )
+
             output = []
             if action in ("version", "all"):
                 srv_ver = ver_data.get("server_version", "N/A")
@@ -1433,6 +1652,26 @@ async def get_host_info(
                         output.append(f"- **`{port_name}`**: {desc}")
                         if hwid:
                             output.append(f"  *HWID:* `{hwid}`")
+
+            if action in ("preferences", "prefs", "all"):
+                if output:
+                    output.append("\n---\n")
+                output.append("### ⚙️ Настройки интерфейса дашборда (config/get_preferences):\n")
+                theme = pref_data.get("theme", "default")
+                dash_view = pref_data.get("dashboard_view", "cards")
+                exp_lvl = pref_data.get("experience_level", "N/A")
+                ver_hist = pref_data.get("version_history_enabled", True)
+                rem_comp = pref_data.get("remote_compute_only", False)
+                dev_layout = pref_data.get("device_editor_layout", "yaml")
+                sec_layout = pref_data.get("secrets_editor_layout", "visual")
+
+                output.append(f"- **Тема оформления:** `{theme}`")
+                output.append(f"- **Режим отображения дашборда:** `{dash_view}`")
+                output.append(f"- **Уровень опыта (experience_level):** `{exp_lvl}`")
+                output.append(f"- **Автоматическая история версий Git:** `{'Включена' if ver_hist else 'Отключена'}`")
+                output.append(f"- **Только удаленные вычисления (remote_compute_only):** `{rem_comp}`")
+                output.append(f"- **Раскладка редактора устройств:** `{dev_layout}`")
+                output.append(f"- **Раскладка редактора секретов:** `{sec_layout}`")
 
             return "\n".join(output)
 
@@ -1626,13 +1865,14 @@ async def manage_build_jobs(
     Инструмент 11 (P1): Управление очередью компиляции и сборки устройств ESPHome.
 
     Параметр action поддерживает следующие действия:
-      - "list"         — список задач (с фильтрацией по status_filter и/или configuration)
-      - "get"          — получить полную информацию о задаче (требует job_id)
-      - "cancel"       — отменить задачу (требует job_id)
-      - "clean"        — очистить каталог сборки конкретного устройства (требует configuration)
-      - "reset_env"    — глобальный сброс .esphome/ (PlatformIO, external_components, build)
-      - "clear"        — очистить историю завершенных задач из памяти (опционально status_filter)
-      - "clear_queued" — отменить отложенное обновление устройства (deferred install, требует configuration)
+      - "list"           — список задач (с фильтрацией по status_filter и/или configuration)
+      - "get"            — получить полную информацию о задаче (требует job_id)
+      - "cancel"         — отменить задачу (требует job_id)
+      - "clean"          — очистить каталог сборки конкретного устройства (требует configuration)
+      - "reset_env"      — глобальный сброс .esphome/ (PlatformIO, external_components, build)
+      - "clear"          — очистить историю завершенных задач из памяти (опционально status_filter)
+      - "clear_queued"   — отменить отложенное обновление устройства (deferred install, требует configuration)
+      - "analyze_memory" — компиляция и анализ расхода памяти RAM и Flash устройства (firmware/analyze_memory, требует configuration)
 
     Параметры:
       - configuration:  имя YAML-файла устройства (например "test.yaml")
@@ -1645,7 +1885,7 @@ async def manage_build_jobs(
     msg_id = "build_jobs_1"
     action = action.strip().lower()
 
-    valid_actions = ("list", "get", "cancel", "clean", "reset_env", "clear", "clear_queued")
+    valid_actions = ("list", "get", "cancel", "clean", "reset_env", "clear", "clear_queued", "analyze_memory")
     if action not in valid_actions:
         return f"Ошибка: неизвестное действие '{action}'. Допустимые: {', '.join(valid_actions)}."
 
@@ -1657,6 +1897,8 @@ async def manage_build_jobs(
         return "Ошибка: для действия 'clean' необходимо указать параметр configuration."
     if action == "clear_queued" and not configuration:
         return "Ошибка: для действия 'clear_queued' необходимо указать параметр configuration."
+    if action == "analyze_memory" and not configuration:
+        return "Ошибка: для действия 'analyze_memory' необходимо указать параметр configuration."
 
     config_clean = resolve_configuration(configuration) if configuration else ""
 
@@ -1675,6 +1917,9 @@ async def manage_build_jobs(
         args = {"job_id": job_id}
     elif action == "clean":
         command = "firmware/clean"
+        args = {"configuration": config_clean}
+    elif action == "analyze_memory":
+        command = "firmware/analyze_memory"
         args = {"configuration": config_clean}
     elif action == "reset_env":
         command = "firmware/reset_build_env"
@@ -1702,8 +1947,8 @@ async def manage_build_jobs(
                 "args": args
             }))
 
-            # clean и reset_env запускают Job — нужно ждать Job-result
-            if action in ("clean", "reset_env"):
+            # clean, reset_env и analyze_memory запускают Job — нужно ждать Job-result
+            if action in ("clean", "reset_env", "analyze_memory"):
                 job_id_from_resp = None
                 while True:
                     res_raw = await ws.recv()
@@ -1742,6 +1987,9 @@ async def manage_build_jobs(
                         status_data = fdata.get("data", {})
                         success = (status_data.get("status") == "completed" or status_data.get("success") is True)
                         status_str = "УСПЕШНО ✅" if success else f"ОШИБКА ❌ ({status_data.get('status', '?')})"
+                        if action == "analyze_memory":
+                            tail = "\n".join(follow_log[-60:])
+                            return f"### 📊 Анализ расхода памяти для `{config_clean}` ({status_str}):\n\n```text\n{tail}\n```"
                         tail = "\n".join(follow_log[-20:])
                         label = "очистку сборки" if action == "clean" else "сброс build-окружения"
                         return f"Статус ({label}): {status_str}\n\nЛог:\n{tail}"
@@ -2513,13 +2761,15 @@ async def manage_version_history(
     Позволяет агенту просматривать историю изменений YAML-конфигураций ESPHome,
     получать diff между ревизиями, просматривать содержимое старых версий,
     находить удаленные конфигурации и восстанавливать файлы до выбранного коммита.
+    Поддерживает нативный ESPHome WebSocket API (version_history/*) с автоматическим
+    fallback на локальный Git при работе в репозитории разработки.
 
     Параметр action поддерживает:
       - "log"      — история коммитов по файлу или всему каталогу (sha, дата, автор, сообщение)
       - "diff"     — просмотр изменений (рабочая копия vs HEAD, либо между sha и sha_compare)
       - "show"     — чтение содержимого файла конфигурации на момент коммита sha
       - "deleted"  — поиск удаленных ранее файлов конфигураций в истории Git
-      - "restore"  — откат/восстановление файла до состояния коммита sha (через API устройств)
+      - "restore"  — откат/восстановление файла до состояния коммита sha
 
     Параметры:
       - action:        режим работы ("log", "diff", "show", "deleted", "restore")
@@ -2540,20 +2790,97 @@ async def manage_version_history(
 
     if action in ("show", "get") and not cfg_clean:
         return "Ошибка: для действия 'show' необходимо указать параметр 'configuration' (YAML-файл устройства)."
-    if action == "restore":
-        if not cfg_clean:
-            return "Ошибка: для действия 'restore' необходимо указать параметр 'configuration' (YAML-файл устройства)."
-        if not sha.strip():
-            return "Ошибка: для действия 'restore' необходимо указать хэш коммита в параметре 'sha'."
+    if action == "restore" and not cfg_clean:
+        return "Ошибка: для действия 'restore' необходимо указать параметр 'configuration' (YAML-файл устройства)."
 
+    logger.info(f"manage_version_history: action={action!r}, configuration={cfg_clean!r}, sha={sha!r}")
+
+    # 1. Попытка выполнения через нативный WebSocket API ESPHome
+    ws_url = get_ws_url(host, port)
+    msg_id = "ver_hist_1"
+    ws_success = False
+    ws_result_text = None
+
+    try:
+        async with websockets.connect(ws_url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if not first_msg.get("requires_auth"):
+                if action in ("log", "list"):
+                    args = {"configuration": cfg_clean} if cfg_clean else {}
+                    await ws.send(json.dumps({"command": "version_history/list_versions", "message_id": msg_id, "args": args}))
+                    data = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+                    if not data.get("error_code"):
+                        versions = data.get("result", []) or []
+                        if versions:
+                            target_header = f"конфигурации `{cfg_clean}`" if cfg_clean else "всех конфигураций ESPHome"
+                            output = [f"### 📜 История версий {target_header} (через ESPHome API, {len(versions)} коммитов):\n"]
+                            for v in versions[:max_count]:
+                                v_sha = v.get("short_sha") or v.get("sha", "")[:7]
+                                v_author = v.get("author", "Unknown")
+                                v_time = v.get("timestamp") or v.get("date", "")
+                                v_msg = v.get("message", "").strip()
+                                output.append(f"- `{v_sha}` | **{v_time}** | {v_author} — *{v_msg}*")
+                            output.append("\n💡 Для просмотра изменений используйте `manage_version_history action=diff sha=<хэш>`")
+                            ws_result_text = "\n".join(output)
+                            ws_success = True
+
+                elif action == "diff" and cfg_clean and sha:
+                    await ws.send(json.dumps({"command": "version_history/get_diff", "message_id": msg_id, "args": {"configuration": cfg_clean, "sha": sha}}))
+                    data = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+                    if not data.get("error_code") and data.get("result"):
+                        diff_text = data.get("result", {}).get("diff", "").strip()
+                        if diff_text:
+                            ws_result_text = f"### 🔀 Различия (diff) для `{cfg_clean}` (ESPHome API, ревизия {sha}):\n\n```diff\n{diff_text}\n```"
+                            ws_success = True
+
+                elif action in ("show", "get") and cfg_clean and sha:
+                    await ws.send(json.dumps({"command": "version_history/get_version", "message_id": msg_id, "args": {"configuration": cfg_clean, "sha": sha}}))
+                    data = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+                    if not data.get("error_code") and data.get("result"):
+                        content = data.get("result", {}).get("content", "")
+                        ws_result_text = f"### 📄 Содержимое `{cfg_clean}` на момент коммита `{sha}` (ESPHome API):\n\n```yaml\n{content}\n```"
+                        ws_success = True
+
+                elif action in ("deleted", "list_deleted"):
+                    await ws.send(json.dumps({"command": "version_history/list_deleted", "message_id": msg_id, "args": {}}))
+                    data = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+                    if not data.get("error_code") and data.get("result"):
+                        del_list = data.get("result", []) or []
+                        if del_list:
+                            output = [f"### 🗑 Удаленные конфигурации в истории ESPHome API ({len(del_list)} шт.):\n"]
+                            for item in del_list:
+                                item_cfg = item.get("configuration") if isinstance(item, dict) else str(item)
+                                output.append(f"- `{item_cfg}`")
+                            output.append("\n💡 Для восстановления удаленного файла используйте `manage_version_history action=\"restore\" configuration=\"<имя_файла>\"`")
+                            ws_result_text = "\n".join(output)
+                            ws_success = True
+
+                elif action == "restore" and cfg_clean:
+                    r_args = {"configuration": cfg_clean}
+                    if sha.strip():
+                        r_args["sha"] = sha.strip()
+                    await ws.send(json.dumps({"command": "version_history/restore", "message_id": msg_id, "args": r_args}))
+                    data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                    if not data.get("error_code") and data.get("result"):
+                        restored_from = data.get("result", {}).get("restored_from", sha or "latest")
+                        ws_result_text = f"### 🔄 Восстановление конфигурации `{cfg_clean}`:\n\n✅ Файл `{cfg_clean}` успешно восстановлен до состояния коммита `{restored_from}` через нативный API ESPHome!"
+                        ws_success = True
+    except Exception as e:
+        logger.debug(f"Нативный version_history API недоступен или вернул ошибку ({e}), переключение на Git fallback")
+
+    if ws_success and ws_result_text:
+        return ws_result_text
+
+    # 2. Fallback на локальный Git-репозиторий
     repo_info = find_git_repo(config_dir)
     if not repo_info:
-        return "Ошибка: не удалось обнаружить Git-репозиторий с конфигурациями ESPHome. Укажите путь через параметр 'config_dir'."
+        if ws_result_text:
+            return ws_result_text
+        return "Внимание: история версий пуста в API ESPHome (или отключена сервером), а локальный Git-репозиторий с конфигурациями не обнаружен."
 
     repo_root, prefix = repo_info
     rel_file = f"{prefix}/{cfg_clean}".lstrip("/") if cfg_clean else ""
-
-    logger.info(f"manage_version_history: action={action!r}, configuration={cfg_clean!r}, repo={repo_root!r}")
 
     try:
         if action in ("log", "list"):
@@ -2653,7 +2980,6 @@ async def manage_version_history(
                 return f"Ошибка извлечения версии `{git_path}` для отката: {res.stderr.strip()}"
 
             restored_content = res.stdout
-            # Применяем восстановленное содержимое через API устройства
             apply_res = await manage_device_config(
                 action="update",
                 configuration=cfg_clean,
@@ -2662,7 +2988,6 @@ async def manage_version_history(
                 port=port
             )
 
-            # Если файл ранее был удален и не найден, создаем его заново
             if "not found" in apply_res.lower() or "не найден" in apply_res.lower():
                 apply_res = await manage_device_config(
                     action="create",
@@ -2683,25 +3008,6 @@ async def manage_version_history(
         return error_msg
 
 
-def apply_yaml_diff(content: str, diff: dict) -> str:
-    """
-    Применяет diff от сервера ESPHome (fromLine, toLine, replacement) к YAML-тексту.
-    Строки в diff 1-индексированы.
-    """
-    from_line = max(1, diff.get("fromLine", 1)) - 1  # 1-based -> 0-based
-    to_line = max(0, diff.get("toLine", 0)) - 1
-    replacement = diff.get("replacement", "")
-
-    lines = content.splitlines(keepends=True)
-    if to_line < from_line:
-        # Вставка перед from_line
-        new_lines = lines[:from_line] + [replacement] + lines[from_line:]
-    else:
-        # Замена диапазона [from_line, to_line]
-        new_lines = lines[:from_line] + [replacement] + lines[to_line + 1:]
-    return "".join(new_lines)
-
-
 @mcp.tool()
 async def manage_automations(
     action: str = "parse",
@@ -2710,8 +3016,13 @@ async def manage_automations(
     trigger: str = "",
     kind: str = "component_on",
     automation: dict | None = None,
+    expected: str | None = None,
     apply: bool = False,
     query: str = "",
+    platform: str = "",
+    board_id: str = "",
+    refs: list | dict | str | None = None,
+    include_advanced: bool = False,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT
 ) -> str:
@@ -2720,45 +3031,57 @@ async def manage_automations(
 
     Позволяет агенту инспектировать, парсить, валидировать, создавать, модифицировать
     и удалять блоки автоматизаций (on_press, on_turn_on, on_state, interval, script и др.)
-    с точечной вставкой в YAML-файл без нарушения структуры и форматирования остального кода.
+    с атомарной точечной вставкой в YAML-файл через нативный движок AST ESPHome.
 
     Параметр action поддерживает:
-      - "parse"       — разбор и вывод всех автоматизаций устройства в виде AST дерева (automations/parse).
-                        Требует: configuration.
-      - "available"   — список доступных сущностей, триггеров и действий для устройства (automations/get_available).
-                        Требует: configuration.
-      - "triggers"    — глобальный каталог доступных триггеров ESPHome (automations/get_triggers).
-                        Опционально: query (фильтр по имени/домену).
-      - "actions"     — глобальный каталог доступных действий ESPHome (automations/get_actions).
-                        Опционально: query (фильтр по имени/домену).
-      - "conditions"  — глобальный каталог доступных условий ESPHome (automations/get_conditions).
-                        Опционально: query (фильтр по имени/домену).
-      - "upsert"      — точечное добавление или обновление блока автоматизации в YAML-файле (automations/upsert).
-                        Требует: configuration, component_id, trigger, automation (структура триггера и действий).
-                        Опционально: kind ("component_on" по умолчанию), apply (True для автоматического сохранения).
-      - "delete"      — точечное удаление блока автоматизации из YAML-файла (automations/delete).
-                        Требует: configuration, component_id, trigger.
-                        Опционально: kind ("component_on" по умолчанию), apply (True для автоматического сохранения).
+      - "parse"         — разбор и вывод всех автоматизаций устройства в виде AST дерева (automations/parse).
+                          Требует: configuration.
+      - "available"     — список доступных сущностей, триггеров и действий для устройства (automations/get_available).
+                          Требует: configuration.
+      - "triggers"      — глобальный каталог доступных триггеров ESPHome (automations/get_triggers).
+                          Опционально: query (фильтр по имени/домену).
+      - "actions"       — глобальный каталог доступных действий ESPHome (automations/get_actions).
+                          Опционально: query (фильтр по имени/домену).
+      - "conditions"    — глобальный каталог доступных условий ESPHome (automations/get_conditions).
+                          Опционально: query (фильтр по имени/домену).
+      - "light_effects" — каталог световых эффектов ESPHome (automations/get_light_effects).
+                          Опционально: platform, board_id, query.
+      - "filters"       — каталог фильтров для сенсоров/бинарных сенсоров (automations/get_filters).
+                          Опционально: query.
+      - "docs"          — паспорта и схемы параметров триггеров, действий, условий и эффектов (automations/get_bodies).
+                          Требует: refs (список объектов до 50 шт, например [{'type': 'actions', 'id': 'switch.toggle'}]).
+                          Опционально: include_advanced (bool).
+      - "upsert"        — точечное добавление или обновление блока автоматизации в YAML-файле (automations/upsert).
+                          Требует: configuration, component_id, trigger, automation (структура триггера и действий).
+                          Опционально: kind ("component_on" по умолчанию), expected (ожидаемый YAML-блок), apply (True для автоматического сохранения).
+      - "delete"        — точечное удаление блока автоматизации из YAML-файла (automations/delete).
+                          Требует: configuration, component_id, trigger.
+                          Опционально: kind ("component_on" по умолчанию), expected (ожидаемый YAML-блок), apply (True для автоматического сохранения).
 
     Параметры:
-      - action:        режим работы ("parse", "available", "triggers", "actions", "conditions", "upsert", "delete")
-      - configuration: имя YAML-файла устройства (например "test.yaml")
-      - component_id:  ID сущности/компонента (например "relay_switch", "test_button")
-      - trigger:       имя триггера (например "on_turn_on", "on_press", "on_value")
-      - kind:          тип обработчика ("component_on" по умолчанию, "interval", "script" и др.)
-      - automation:    словарь описания автоматизации (trigger_id, actions, trigger_params)
-      - apply:         флаг автоматического применения diff в файл конфигурации (по умолчанию False)
-      - query:         поисковый фильтр для каталогов triggers/actions/conditions
-      - host:          хост сервера ESPHome
-      - port:          сетевой порт WebSocket API ESPHome
+      - action:           режим работы ("parse", "available", "triggers", "actions", "conditions", "light_effects", "filters", "docs", "upsert", "delete")
+      - configuration:    имя YAML-файла устройства (например "test.yaml")
+      - component_id:     ID сущности/компонента (например "relay_switch", "test_button")
+      - trigger:          имя триггера (например "on_turn_on", "on_press", "on_value")
+      - kind:             тип обработчика ("component_on" по умолчанию, "interval", "script" и др.)
+      - automation:       словарь описания автоматизации (trigger_id, actions, trigger_params)
+      - expected:         ожидаемое текущее содержимое блока в YAML (для оптимистичной блокировки, опционально)
+      - apply:            флаг сохранения изменений в файл на диск (save: true при True, иначе dry-run)
+      - query:            поисковый фильтр для каталогов
+      - platform:         платформа для фильтрации световых эффектов (например "esp32")
+      - board_id:         ID платы для фильтрации световых эффектов
+      - refs:             список ссылок на паспорта автоматизаций для action="docs" ([{'type': '...', 'id': '...'}])
+      - include_advanced: выводить ли расширенные/скрытые поля в схеме паспортов
+      - host:             хост сервера ESPHome
+      - port:             сетевой порт WebSocket API ESPHome
     """
     url = get_ws_url(host, port)
     msg_id = "automations_tool_1"
     action = action.strip().lower()
 
-    valid_actions = ("parse", "available", "triggers", "actions", "conditions", "upsert", "delete")
+    valid_actions = ("parse", "available", "triggers", "actions", "conditions", "light_effects", "filters", "docs", "bodies", "upsert", "delete")
     if action not in valid_actions:
-        return f"Ошибка: неизвестное действие '{action}'. Допустимые: parse, available, triggers, actions, conditions, upsert, delete."
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: parse, available, triggers, actions, conditions, light_effects, filters, docs, upsert, delete."
 
     cfg_clean = resolve_configuration(configuration) if configuration else ""
 
@@ -2783,7 +3106,7 @@ async def manage_automations(
         if not trigger.strip():
             return "Ошибка: для действия 'delete' необходимо указать параметр 'trigger' (имя триггера, например 'on_turn_on')."
 
-    logger.info(f"manage_automations: action={action!r}, configuration={cfg_clean!r}, component_id={component_id!r}")
+    logger.info(f"manage_automations: action={action!r}, configuration={cfg_clean!r}, component_id={component_id!r}, apply={apply}")
 
     try:
         async with websockets.connect(url, ping_interval=None) as ws:
@@ -2849,6 +3172,114 @@ async def manage_automations(
                     output.append(f"- **`{c_id}`** ({name}, домен: `{domain}`): {desc}")
                 return "\n".join(output)
 
+            elif action == "light_effects":
+                le_args: dict = {}
+                if platform.strip():
+                    le_args["platform"] = platform.strip()
+                if board_id.strip():
+                    le_args["board_id"] = board_id.strip()
+                await ws.send(json.dumps({"command": "automations/get_light_effects", "message_id": msg_id, "args": le_args}))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка получения световых эффектов: {data.get('details', data)}"
+                items = data.get("result", []) or []
+                if query:
+                    q = query.strip().lower()
+                    items = [it for it in items if q in it.get("id", "").lower() or q in it.get("name", "").lower() or any(q in p.lower() for p in it.get("applies_to", []))]
+
+                output = [f"### 💡 Каталог световых эффектов ESPHome ({len(items)} шт.):\n"]
+                for it in items[:50]:
+                    e_id = it.get("id", "")
+                    name = it.get("name", "")
+                    applies = ", ".join(f"`{p}`" for p in it.get("applies_to", []))
+                    output.append(f"- **`{e_id}`** ({name}) — платформы: {applies}")
+                return "\n".join(output)
+
+            elif action == "filters":
+                await ws.send(json.dumps({"command": "automations/get_filters", "message_id": msg_id, "args": {}}))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка получения фильтров: {data.get('details', data)}"
+                items = data.get("result", []) or []
+                if query:
+                    q = query.strip().lower()
+                    items = [it for it in items if q in it.get("id", "").lower() or q in it.get("name", "").lower() or any(q in d.lower() for d in it.get("applies_to", []))]
+
+                output = [f"### 🔍 Каталог фильтров сенсоров ESPHome ({len(items)} шт.):\n"]
+                for it in items[:50]:
+                    f_id = it.get("id", "")
+                    name = it.get("name", "")
+                    applies = ", ".join(f"`{d}`" for d in it.get("applies_to", []))
+                    vtype = it.get("value_type", "")
+                    v_str = f" [тип: `{vtype}`]" if vtype else ""
+                    output.append(f"- **`{f_id}`** ({name}){v_str} — домены: {applies}")
+                return "\n".join(output)
+
+            elif action in ("docs", "bodies"):
+                refs_list = []
+                if isinstance(refs, str) and refs.strip():
+                    try:
+                        parsed_refs = json.loads(refs)
+                        refs_list = parsed_refs if isinstance(parsed_refs, list) else [parsed_refs]
+                    except json.JSONDecodeError:
+                        return "Ошибка: параметр 'refs' должен быть валидным JSON списком объектов [{'type': '...', 'id': '...'}]"
+                elif isinstance(refs, list):
+                    refs_list = refs
+                elif isinstance(refs, dict):
+                    refs_list = [refs]
+
+                if not refs_list:
+                    return (
+                        "Ошибка: для действия 'docs' необходимо указать параметр 'refs' "
+                        "(список объектов до 50 шт, например [{'type': 'actions', 'id': 'switch.toggle'}])."
+                    )
+
+                body_args = {
+                    "refs": refs_list[:50],
+                    "include_advanced": include_advanced
+                }
+                await ws.send(json.dumps({"command": "automations/get_bodies", "message_id": msg_id, "args": body_args}))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка получения паспортов автоматизаций: {data.get('details', data)}"
+
+                bodies_dict = data.get("result", {}) or {}
+                if not bodies_dict:
+                    return "Паспорта по указанным ссылкам не найдены."
+
+                output = [f"### 📚 Паспорта элементов автоматизаций ({len(bodies_dict)} шт.):\n"]
+                for ref_key, body in bodies_dict.items():
+                    if not isinstance(body, dict):
+                        continue
+                    b_id = body.get("id", ref_key)
+                    b_name = body.get("name", b_id)
+                    b_desc = body.get("description", "").strip()
+                    docs_url = body.get("docs_url", "")
+                    entries = body.get("config_entries", [])
+
+                    output.append(f"#### 🔹 {b_name} (`{b_id}`):")
+                    if b_desc:
+                        output.append(f"{b_desc}\n")
+                    if docs_url:
+                        output.append(f"- **Документация:** {docs_url}")
+
+                    if entries:
+                        output.append("- **Параметры конфигурации (config_entries):**")
+                        for entry in entries:
+                            if not isinstance(entry, dict):
+                                continue
+                            ekey = entry.get("key", "")
+                            etype = entry.get("type", "")
+                            elabel = entry.get("label", ekey)
+                            req = entry.get("required", False)
+                            def_val = entry.get("default_value")
+                            req_str = " *(обязательный)*" if req else ""
+                            def_str = f" [дефолт: `{def_val}`]" if def_val is not None else ""
+                            output.append(f"  - `{ekey}` (*{etype}*): **{elabel}**{req_str}{def_str}")
+                    output.append("")
+
+                return "\n".join(output)
+
             elif action == "available":
                 await ws.send(json.dumps({"command": "automations/get_available", "message_id": msg_id, "args": {"configuration": cfg_clean}}))
                 data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
@@ -2911,14 +3342,19 @@ async def manage_automations(
                     "trigger": trigger.strip(),
                     "kind": kind.strip() or "component_on"
                 }
+                args_dict = {
+                    "configuration": cfg_clean,
+                    "location": location_dict,
+                    "automation": automation,
+                    "save": bool(apply)
+                }
+                if expected is not None:
+                    args_dict["expected"] = expected
+
                 await ws.send(json.dumps({
                     "command": "automations/upsert",
                     "message_id": msg_id,
-                    "args": {
-                        "configuration": cfg_clean,
-                        "location": location_dict,
-                        "automation": automation
-                    }
+                    "args": args_dict
                 }))
                 data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
                 if data.get("error_code"):
@@ -2940,27 +3376,10 @@ async def manage_automations(
                         f"💡 Для сохранения изменений передайте `apply=True`."
                     )
 
-                # Получаем текущий конфиг
-                await ws.send(json.dumps({"command": "devices/get_config", "message_id": "cfg_get", "args": {"configuration": cfg_clean}}))
-                cfg_data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
-                if cfg_data.get("error_code"):
-                    return f"Ошибка чтения конфигурации перед применением: {cfg_data.get('details', cfg_data)}"
-                raw_res = cfg_data.get("result", "")
-                curr_content = raw_res if isinstance(raw_res, str) else (raw_res.get("content", "") if isinstance(raw_res, dict) else "")
-
-                new_content = apply_yaml_diff(curr_content, diff)
-                await ws.send(json.dumps({
-                    "command": "devices/update_config",
-                    "message_id": "cfg_upd",
-                    "args": {"configuration": cfg_clean, "content": new_content}
-                }))
-                upd_data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
-                if upd_data.get("error_code"):
-                    return f"Ошибка сохранения конфигурации с новой автоматизацией: {upd_data.get('details', upd_data)}"
-
                 return (
                     f"### ⚡ Автоматизация успешно добавлена в `{cfg_clean}`!\n\n"
                     f"- **Компонент:** `{component_id}` | **Триггер:** `{trigger}`\n"
+                    f"- **Целевые строки:** {diff.get('fromLine')}-{diff.get('toLine')}\n"
                     f"- **Вставленный YAML блок:**\n```yaml\n{diff_rep}\n```"
                 )
 
@@ -2970,13 +3389,18 @@ async def manage_automations(
                     "trigger": trigger.strip(),
                     "kind": kind.strip() or "component_on"
                 }
+                args_dict = {
+                    "configuration": cfg_clean,
+                    "location": location_dict,
+                    "save": bool(apply)
+                }
+                if expected is not None:
+                    args_dict["expected"] = expected
+
                 await ws.send(json.dumps({
                     "command": "automations/delete",
                     "message_id": msg_id,
-                    "args": {
-                        "configuration": cfg_clean,
-                        "location": location_dict
-                    }
+                    "args": args_dict
                 }))
                 data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
                 if data.get("error_code"):
@@ -2994,24 +3418,6 @@ async def manage_automations(
                         f"- **Удаляемые строки:** {diff.get('fromLine')}-{diff.get('toLine')}\n\n"
                         f"💡 Для сохранения изменений передайте `apply=True`."
                     )
-
-                # Получаем текущий конфиг
-                await ws.send(json.dumps({"command": "devices/get_config", "message_id": "cfg_get", "args": {"configuration": cfg_clean}}))
-                cfg_data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
-                if cfg_data.get("error_code"):
-                    return f"Ошибка чтения конфигурации перед удалением: {cfg_data.get('details', cfg_data)}"
-                raw_res = cfg_data.get("result", "")
-                curr_content = raw_res if isinstance(raw_res, str) else (raw_res.get("content", "") if isinstance(raw_res, dict) else "")
-
-                new_content = apply_yaml_diff(curr_content, diff)
-                await ws.send(json.dumps({
-                    "command": "devices/update_config",
-                    "message_id": "cfg_upd",
-                    "args": {"configuration": cfg_clean, "content": new_content}
-                }))
-                upd_data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
-                if upd_data.get("error_code"):
-                    return f"Ошибка сохранения конфигурации после удаления: {upd_data.get('details', upd_data)}"
 
                 return f"### 🗑 Автоматизация `{trigger}` компонента `{component_id}` успешно удалена из `{cfg_clean}`!"
 
@@ -3178,6 +3584,14 @@ async def manage_remote_build(
     target_port: int = 6052,
     pairing_key: str = "",
     peer_id: str = "",
+    dashboard_id: str = "",
+    pin_sha256: str = "",
+    receiver_label: str = "",
+    offloader_label: str = "",
+    open_window: bool = True,
+    version_match_policy: str = "",
+    include_local_in_pool: bool | None = None,
+    remote_builds_enabled: bool | None = None,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT
 ) -> str:
@@ -3185,48 +3599,72 @@ async def manage_remote_build(
     Инструмент 27 (P2): Управление распределенной кластерной компиляцией (Remote Build / Offloading).
 
     Позволяет агенту мониторить состояние распределенной сборки, настраивать параметры offloading,
-    выполнять сопряжение с удаленными узлами сборки (handshake Noise XX / fingerprint), одобрять и удалять пиры.
+    получать identity узла, управлять окном сопряжения, выполнять сопряжение с удаленными узлами сборки (handshake Noise XX / fingerprint),
+    ротировать ключи, одобрять, разрывать сопряжение, включать/выключать пиры и удалять их.
 
     Параметр action поддерживает:
-      - "get_settings" — получение текущих настроек кластерной компиляции и списка подключенных пиров (remote_build/get_settings).
-      - "set_settings" — обновление настроек (enabled, cleanup_ttl_seconds) (remote_build/set_settings).
-      - "preview_pair" — предварительная проверка и получение fingerprint публичного ключа удаленного узла (remote_build/preview_pair).
-                         Требует: hostname, опционально: target_port (по умолчанию 6052).
-      - "request_pair" — запрос сопряжения с удаленным узлом компиляции (remote_build/request_pair).
-                         Требует: hostname, опционально: target_port, pairing_key.
-      - "approve_peer" — одобрение входящего запроса на сопряжение от пира (remote_build/approve_peer).
-                         Требует: peer_id.
-      - "unpair"       — разрыв сопряжения с пиром (remote_build/unpair).
-                         Требует: peer_id.
-      - "remove_peer"  — удаление пира из конфигурации (remote_build/remove_peer).
-                         Требует: peer_id.
+      - "get_settings"           — получение текущих настроек кластерной компиляции и списка подключенных пиров (remote_build/get_settings).
+      - "set_settings"           — обновление настроек (enabled, cleanup_ttl_seconds) (remote_build/set_settings).
+      - "get_identity"           — получение криптографической идентичности данного узла сборки (remote_build/get_identity).
+      - "rotate_identity"        — принудительная ротация X25519 пары ключей узла (remote_build/rotate_identity).
+      - "set_pairing_window"     — открытие/закрытие окна сопряжения Noise XX (remote_build/set_pairing_window, параметр open_window).
+      - "set_offloader_settings" — настройка параметров удаленного планировщика сборки (remote_build/set_offloader_settings, параметры remote_builds_enabled, version_match_policy, include_local_in_pool).
+      - "set_pairing_enabled"    — включение/выключение автоматической отправки сборок на узел (remote_build/set_pairing_enabled, параметры pin_sha256/peer_id, enabled).
+      - "preview_pair"           — предварительная проверка и получение fingerprint (pin_sha256) удаленного узла (remote_build/preview_pair).
+                                   Требует: hostname, опционально: target_port (по умолчанию 6052).
+      - "request_pair"           — запрос сопряжения с удаленным узлом компиляции (remote_build/request_pair).
+                                   Требует: hostname. Опционально: target_port, pin_sha256 (автоопределяется через preview_pair),
+                                   receiver_label, offloader_label, pairing_key.
+      - "approve_peer"           — одобрение входящего запроса на сопряжение от пира (remote_build/approve_peer).
+                                   Требует: dashboard_id (или peer_id).
+      - "unpair"                 — разрыв сопряжения с удаленным узлом (remote_build/unpair).
+                                   Требует: pin_sha256 (или peer_id).
+      - "remove_peer"            — удаление пира из конфигурации билдера (remote_build/remove_peer).
+                                   Требует: dashboard_id (или peer_id).
 
     Параметры:
-      - action:              режим работы ("get_settings", "set_settings", "preview_pair", "request_pair", "approve_peer", "unpair", "remove_peer")
-      - enabled:             включение/отключение кластерной компиляции при set_settings (bool)
-      - cleanup_ttl_seconds: время хранения артефактов в секундах при set_settings (int)
-      - hostname:            хост/IP удаленного узла компиляции для сопряжения
-      - target_port:         сетевой порт удаленного узла компиляции (по умолчанию 6052)
-      - pairing_key:         ключ авторизации для сопряжения (если требуется удаленным сервером)
-      - peer_id:             идентификатор пира/узла сборки
-      - host:                хост сервера ESPHome
-      - port:                сетевой порт WebSocket API ESPHome
+      - action:                режим работы ("get_settings", "set_settings", "get_identity", "rotate_identity", "set_pairing_window", "set_offloader_settings", "set_pairing_enabled", "preview_pair", "request_pair", "approve_peer", "unpair", "remove_peer")
+      - enabled:               включение/отключение кластерной компиляции или флага активности пира (bool)
+      - cleanup_ttl_seconds:   время хранения артефактов в секундах при set_settings (int)
+      - hostname:              хост/IP удаленного узла компиляции для сопряжения
+      - target_port:           сетевой порт удаленного узла компиляции (по умолчанию 6052)
+      - pairing_key:           ключ авторизации для сопряжения (если требуется удаленным сервером)
+      - peer_id:               алиас для dashboard_id или pin_sha256 (для обратной совместимости)
+      - dashboard_id:          идентификатор дашборда пира (для approve_peer и remove_peer)
+      - pin_sha256:            хэш публичного ключа (fingerprint) удаленного узла (для request_pair, unpair, set_pairing_enabled)
+      - receiver_label:        понятное имя удаленного узла (по умолчанию hostname)
+      - offloader_label:       имя клиента сопряжения (по умолчанию "ESPHome MCP Server")
+      - open_window:           открыть (True) или закрыть (False) окно сопряжения (для set_pairing_window)
+      - version_match_policy:  политика сверки версий ("any", "release", "exact", "exact_required" для set_offloader_settings)
+      - include_local_in_pool: включать ли локальную машину в пул параллельных сборок при нагрузке (bool для set_offloader_settings)
+      - remote_builds_enabled: мастер-переключатель использования удаленной сборки (bool для set_offloader_settings)
+      - host:                  хост сервера ESPHome
+      - port:                  сетевой порт WebSocket API ESPHome
     """
     url = get_ws_url(host, port)
     msg_id = "remote_build_tool_1"
     action = action.strip().lower()
 
-    valid_actions = ("get_settings", "set_settings", "preview_pair", "request_pair", "approve_peer", "unpair", "remove_peer")
+    valid_actions = (
+        "get_settings", "set_settings", "get_identity", "rotate_identity",
+        "set_pairing_window", "set_offloader_settings", "set_pairing_enabled",
+        "preview_pair", "request_pair", "approve_peer", "unpair", "remove_peer"
+    )
     if action not in valid_actions:
-        return f"Ошибка: неизвестное действие '{action}'. Допустимые: get_settings, set_settings, preview_pair, request_pair, approve_peer, unpair, remove_peer."
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: {', '.join(valid_actions)}."
 
     if action in ("preview_pair", "request_pair") and not hostname.strip():
         return f"Ошибка: для действия '{action}' необходимо указать параметр 'hostname' (хост или IP-адрес удаленного билдера)."
 
-    if action in ("approve_peer", "unpair", "remove_peer") and not peer_id.strip():
-        return f"Ошибка: для действия '{action}' необходимо указать параметр 'peer_id' (идентификатор узла сборки)."
+    effective_dash_id = (dashboard_id or peer_id).strip()
+    if action in ("approve_peer", "remove_peer") and not effective_dash_id:
+        return f"Ошибка: для действия '{action}' необходимо указать параметр 'peer_id' (или 'dashboard_id')."
 
-    logger.info(f"manage_remote_build: action={action!r}, hostname={hostname!r}, peer_id={peer_id!r}")
+    effective_pin = (pin_sha256 or peer_id).strip()
+    if action in ("unpair", "set_pairing_enabled") and not effective_pin:
+        return f"Ошибка: для действия '{action}' необходимо указать параметр 'peer_id' (или 'pin_sha256')."
+
+    logger.info(f"manage_remote_build: action={action!r}, hostname={hostname!r}, dashboard_id={effective_dash_id!r}, pin_sha256={effective_pin!r}")
 
     try:
         async with websockets.connect(url, ping_interval=None) as ws:
@@ -3264,14 +3702,43 @@ async def manage_remote_build(
                     output.append("  *(список узлов пуст, сопряженные билдеры отсутствуют)*")
                 else:
                     for p in peers:
-                        p_id = p.get("id") or p.get("peer_id") or "N/A"
+                        p_id = p.get("dashboard_id") or p.get("id") or p.get("peer_id") or "N/A"
                         p_host = p.get("hostname") or p.get("host") or "N/A"
                         p_port = p.get("port") or 6052
                         p_status = p.get("status", "unknown")
-                        p_name = p.get("name", "Remote Builder")
+                        p_name = p.get("name") or p.get("receiver_label") or "Remote Builder"
                         output.append(f"  - **{p_name}** (`{p_id}`): `{p_host}:{p_port}` | статус: `{p_status}`")
 
                 return "\n".join(output)
+
+            elif action == "get_identity":
+                await ws.send(json.dumps({
+                    "command": "remote_build/get_identity",
+                    "message_id": msg_id,
+                    "args": {}
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка получения идентичности узла remote_build: {data.get('details', data)}"
+
+                res = data.get("result", {}) or {}
+                d_id = res.get("dashboard_id", "N/A")
+                pin = res.get("pin_sha256", "N/A")
+                srv_v = res.get("server_version", "N/A")
+                esp_v = res.get("esphome_version", "N/A")
+                l_bound = res.get("listener_bound", False)
+                l_host = res.get("listener_host") or "N/A"
+                l_port = res.get("listener_port", 6052)
+                l_addrs = ", ".join(res.get("listener_addresses", [])) or "N/A"
+
+                return (
+                    f"### 🛡 Идентичность узла кластерной сборки ESPHome:\n\n"
+                    f"- **Dashboard ID:** `{d_id}`\n"
+                    f"- **Fingerprint (pin_sha256):** `{pin}`\n"
+                    f"- **Версия сервера:** `{srv_v}` (ESPHome `{esp_v}`)\n"
+                    f"- **Noise Listener:** `{'Активен' if l_bound else 'Не активен'}` (`{l_host}:{l_port}`)\n"
+                    f"- **Сетевые адреса:** `{l_addrs}`"
+                )
 
             elif action == "set_settings":
                 args_dict = {}
@@ -3315,12 +3782,12 @@ async def manage_remote_build(
                     return f"Ошибка предварительной проверки сопряжения с `{t_host}:{t_port}`: {data.get('details', data)}"
 
                 res = data.get("result", {}) or {}
-                fingerprint = res.get("fingerprint") or res.get("public_key_fingerprint") or "N/A"
+                fingerprint = res.get("pin_sha256") or res.get("fingerprint") or "N/A"
                 req_key = res.get("requires_pairing_key", False)
 
                 return (
                     f"### 🤝 Результат проверки узла для сопряжения `{t_host}:{t_port}`:\n\n"
-                    f"- **Fingerprint публичного ключа:** `{fingerprint}`\n"
+                    f"- **Fingerprint публичного ключа (pin_sha256):** `{fingerprint}`\n"
                     f"- **Требуется pairing key:** `{'Да' if req_key else 'Нет'}`\n\n"
                     f"💡 Для завершения сопряжения вызовите `action='request_pair', hostname='{t_host}', target_port={t_port}`."
                 )
@@ -3328,7 +3795,33 @@ async def manage_remote_build(
             elif action == "request_pair":
                 t_host = hostname.strip()
                 t_port = target_port if target_port else 6052
-                args_dict = {"hostname": t_host, "port": t_port}
+                target_pin = pin_sha256.strip()
+
+                # Если fingerprint не передан, запрашиваем его автоматически через preview_pair
+                if not target_pin:
+                    await ws.send(json.dumps({
+                        "command": "remote_build/preview_pair",
+                        "message_id": "pair_prev_auto",
+                        "args": {"hostname": t_host, "port": t_port}
+                    }))
+                    prev_data = json.loads(await asyncio.wait_for(ws.recv(), timeout=15.0))
+                    if prev_data.get("error_code"):
+                        return f"Ошибка предварительного получения pin_sha256 с `{t_host}:{t_port}`: {prev_data.get('details', prev_data)}"
+                    prev_res = prev_data.get("result", {}) or {}
+                    target_pin = prev_res.get("pin_sha256") or prev_res.get("fingerprint") or ""
+                    if not target_pin:
+                        return f"Ошибка: удаленный узел `{t_host}:{t_port}` не вернул pin_sha256 при preview_pair."
+
+                r_label = receiver_label.strip() or t_host
+                o_label = offloader_label.strip() or "ESPHome MCP Server"
+
+                args_dict = {
+                    "hostname": t_host,
+                    "port": t_port,
+                    "pin_sha256": target_pin,
+                    "receiver_label": r_label,
+                    "offloader_label": o_label
+                }
                 if pairing_key.strip():
                     args_dict["pairing_key"] = pairing_key.strip()
 
@@ -3344,27 +3837,121 @@ async def manage_remote_build(
                 res = data.get("result", {}) or {}
                 return (
                     f"### 🚀 Запрос на сопряжение с `{t_host}:{t_port}` успешно отправлен!\n\n"
-                    f"Ответ сервера: `{res if res else 'OK'}`"
+                    f"- **Fingerprint (pin_sha256):** `{target_pin}`\n"
+                    f"- **Имя узла:** `{r_label}`\n"
+                    f"- **Ответ сервера:** `{res if res else 'OK'}`"
                 )
 
-            elif action in ("approve_peer", "unpair", "remove_peer"):
-                target_pid = peer_id.strip()
+            elif action in ("approve_peer", "remove_peer"):
+                cmd_args = {"dashboard_id": effective_dash_id}
                 await ws.send(json.dumps({
                     "command": f"remote_build/{action}",
                     "message_id": msg_id,
-                    "args": {"peer_id": target_pid}
+                    "args": cmd_args
                 }))
                 data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
                 if data.get("error_code"):
-                    return f"Ошибка выполнения команды '{action}' для пира `{target_pid}`: {data.get('details', data)}"
+                    return f"Ошибка выполнения команды '{action}' для dashboard_id `{effective_dash_id}`: {data.get('details', data)}"
 
                 res = data.get("result", {}) or {}
                 action_titles = {
                     "approve_peer": "одобрен",
-                    "unpair": "сопряжение разорвано",
                     "remove_peer": "удален из конфигурации"
                 }
-                return f"### ✅ Пир `{target_pid}` успешно {action_titles.get(action, action)}!"
+                return f"### ✅ Пир `{effective_dash_id}` успешно {action_titles.get(action, action)}!"
+
+            elif action == "unpair":
+                cmd_args = {"pin_sha256": effective_pin}
+                await ws.send(json.dumps({
+                    "command": "remote_build/unpair",
+                    "message_id": msg_id,
+                    "args": cmd_args
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка выполнения unpair для pin_sha256 `{effective_pin}`: {data.get('details', data)}"
+
+                return f"### ✅ Сопряжение для pin_sha256 `{effective_pin}` успешно разорвано!"
+
+            elif action == "set_pairing_window":
+                is_open = open_window if open_window is not None else (enabled if enabled is not None else True)
+                await ws.send(json.dumps({
+                    "command": "remote_build/set_pairing_window",
+                    "message_id": msg_id,
+                    "args": {"open": is_open}
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка управления окном сопряжения: {data.get('details', data)}"
+                res = data.get("result", {}) or {}
+                exp_sec = res.get("expires_in_seconds")
+                exp_str = f" (истекает через {exp_sec:.0f} сек)" if exp_sec is not None else ""
+                status_text = "открыто" if is_open else "закрыто"
+                return f"### 🪟 Окно сопряжения Noise XX успешно {status_text}{exp_str} (remote_build/set_pairing_window)."
+
+            elif action == "rotate_identity":
+                await ws.send(json.dumps({
+                    "command": "remote_build/rotate_identity",
+                    "message_id": msg_id,
+                    "args": {}
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка ротации ключей identity: {data.get('details', data)}"
+                res = data.get("result", {}) or {}
+                dash_id = res.get("dashboard_id", "N/A")
+                pin = res.get("pin_sha256", "N/A")
+                pub_key = res.get("public_key", "N/A")
+                return (
+                    f"### 🔑 Ключи узла успешно ротированы (remote_build/rotate_identity):\n\n"
+                    f"- **Dashboard ID:** `{dash_id}`\n"
+                    f"- **Новый Fingerprint (pin_sha256):** `{pin}`\n"
+                    f"- **Публичный ключ:** `{pub_key}`\n\n"
+                    f"⚠️ *Ранее сопряженные пиры должны повторно подтвердить сопряжение из-за смены fingerprint.*"
+                )
+
+            elif action == "set_offloader_settings":
+                offloader_args = {}
+                if remote_builds_enabled is not None:
+                    offloader_args["remote_builds_enabled"] = remote_builds_enabled
+                elif enabled is not None:
+                    offloader_args["remote_builds_enabled"] = enabled
+
+                if version_match_policy.strip():
+                    offloader_args["version_match_policy"] = version_match_policy.strip().lower()
+
+                if include_local_in_pool is not None:
+                    offloader_args["include_local_in_pool"] = include_local_in_pool
+
+                if not offloader_args:
+                    return "Ошибка: для действия 'set_offloader_settings' необходимо указать хотя бы одну настройку (remote_builds_enabled, version_match_policy или include_local_in_pool)."
+
+                await ws.send(json.dumps({
+                    "command": "remote_build/set_offloader_settings",
+                    "message_id": msg_id,
+                    "args": offloader_args
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка обновления настроек offloader: {data.get('details', data)}"
+                res = data.get("result", {}) or {}
+                return (
+                    f"### ⚙️ Настройки планировщика кластерной сборки успешно обновлены (remote_build/set_offloader_settings):\n\n"
+                    f"```json\n{json.dumps(res, indent=2, ensure_ascii=False)}\n```"
+                )
+
+            elif action == "set_pairing_enabled":
+                is_en = enabled if enabled is not None else True
+                await ws.send(json.dumps({
+                    "command": "remote_build/set_pairing_enabled",
+                    "message_id": msg_id,
+                    "args": {"pin_sha256": effective_pin, "enabled": is_en}
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if data.get("error_code"):
+                    return f"Ошибка переключения активности сопряжения для pin_sha256 `{effective_pin}`: {data.get('details', data)}"
+                status_str = "включена" if is_en else "отключена"
+                return f"### ✅ Автоматическая маршрутизация сборок для узла `{effective_pin}` успешно {status_str} (remote_build/set_pairing_enabled)."
 
     except Exception as e:
         error_msg = f"Критическая ошибка manage_remote_build ({url}): {str(e)}"
@@ -3374,6 +3961,7 @@ async def manage_remote_build(
 
 @mcp.tool()
 async def authenticate_esphome(
+    action: str = "login",
     username: str = "",
     password: str = "",
     token: str = "",
@@ -3381,41 +3969,58 @@ async def authenticate_esphome(
     port: int = DEFAULT_PORT
 ) -> str:
     """
-    Инструмент 15 (P2): Аутентификация на защищённом ESPHome-сервере (requires_auth=true).
+    Инструмент 15 (P2): Управление аутентификацией и сессиями на ESPHome-сервере.
 
-    Используйте, если ESPHome запущен с параметрами --username/--password или
-    переменными окружения ESPHOME_USERNAME/ESPHOME_PASSWORD.
+    Параметр action поддерживает:
+      - "login"   — вход в систему по логину/паролю или токену (auth/login)
+      - "logout"  — отзыв текущего токена сессии и закрытие соединения (auth/logout)
+      - "refresh" — продление срока действия токена текущей сессии (auth/refresh)
 
-    Варианты аутентификации:
+    Варианты аутентификации (при action="login"):
       1. По логину и паролю: укажите username и password
       2. По токену (повторный вход): укажите только token
 
-    Возвращает токен сессии (expires_at), который можно использовать для повторного входа.
+    Параметры:
+      - action:   действие ("login", "logout", "refresh")
+      - username: имя пользователя ESPHome
+      - password: пароль учетной записи
+      - token:    токен доступа (JWT / session token)
+      - host:     хост сервера ESPHome
+      - port:     сетевой порт WebSocket API ESPHome
     """
-    if not token and not (username and password):
-        return "Ошибка: необходимо указать либо (username + password), либо token."
+    action = action.strip().lower()
+    valid_actions = ("login", "logout", "refresh")
+    if action not in valid_actions:
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: login, logout, refresh."
+
+    if action == "login" and not token and not (username and password):
+        return "Ошибка: для действия 'login' необходимо указать либо (username + password), либо token."
 
     url = get_ws_url(host, port)
     p = port if port is not None else DEFAULT_PORT
-    msg_id = "auth_login_1"
+    msg_id = f"auth_{action}_1"
 
-    args: dict = {}
-    if token:
-        args = {"token": token}
-    else:
-        args = {"username": username, "password": password}
-
-    logger.info(f"authenticate_esphome: host={host!r}, by_token={bool(token)}")
+    logger.info(f"authenticate_esphome: action={action!r}, host={host!r}, by_token={bool(token)}")
     try:
         async with websockets.connect(url, ping_interval=None) as ws:
             first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
             first_msg = json.loads(first_msg_raw)
 
-            if not first_msg.get("requires_auth"):
+            if action == "login" and not first_msg.get("requires_auth"):
                 return f"ℹ️ ESPHome на {host}:{p} не требует аутентификации (requires_auth=false). Вход не нужен."
 
+            if action == "login":
+                args: dict = {"token": token} if token else {"username": username, "password": password}
+                cmd = "auth/login"
+            elif action == "logout":
+                args = {}
+                cmd = "auth/logout"
+            elif action == "refresh":
+                args = {"token": token} if token else {}
+                cmd = "auth/refresh"
+
             await ws.send(json.dumps({
-                "command": "auth/login",
+                "command": cmd,
                 "message_id": msg_id,
                 "args": args
             }))
@@ -3427,31 +4032,1122 @@ async def authenticate_esphome(
                 if data.get("error_code"):
                     code = data.get("error_code", "")
                     if code == "not_authenticated":
-                        return "❌ Аутентификация не удалась: неверный логин или пароль."
+                        return "❌ Ошибка аутентификации: сессия не авторизована или неверные учетные данные."
                     if code == "rate_limited":
-                        return "❌ Слишком много попыток входа. Повторите через 5 минут."
-                    return f"❌ Ошибка аутентификации: {data.get('details', data)}"
+                        return "❌ Слишком много попыток. Повторите через 5 минут."
+                    return f"❌ Ошибка auth/{action}: {data.get('details', data)}"
 
                 result = data.get("result", {}) or {}
-                new_token = result.get("token", "")
-                expires_at = result.get("expires_at", "")
 
-                return (
-                    f"✅ Аутентификация успешна на {host}:{p}\n"
-                    f"- **Токен:** `{new_token}`\n"
-                    f"- **Действителен до:** {expires_at}\n\n"
-                    f"💡 Сохраните токен для повторного входа без пароля (параметр token)."
-                )
+                if action == "login":
+                    new_token = result.get("token", "")
+                    expires_at = result.get("expires_at", "")
+                    return (
+                        f"✅ Аутентификация успешна на {host}:{p}\n"
+                        f"- **Токен:** `{new_token}`\n"
+                        f"- **Действителен до:** {expires_at}\n\n"
+                        f"💡 Сохраните токен для повторного входа без пароля (параметр token)."
+                    )
+
+                elif action == "logout":
+                    return f"✅ Сессия успешно завершена на {host}:{p} (auth/logout): токен отозван."
+
+                elif action == "refresh":
+                    new_token = result.get("token", "")
+                    expires_at = result.get("expires_at", "")
+                    return (
+                        f"### 🔄 Срок действия токена успешно продлен (auth/refresh):\n\n"
+                        f"- **Токен:** `{new_token}`\n"
+                        f"- **Новый срок действия:** {expires_at}"
+                    )
 
     except Exception as e:
         error_msg = f"Критическая ошибка authenticate_esphome ({url}): {str(e)}"
         logger.error(error_msg)
+        return error_msg
+
+
+# ==============================================================================
+# РАЗДЕЛ: ДИНАМИЧЕСКИЕ И КОНТЕКСТНЫЕ РЕСУРСЫ MCP (MCP Resources, Фаза 4.1)
+# ==============================================================================
+
+@mcp.resource("esphome://devices", name="devices_registry", description="Актуальный реестр всех сконфигурированных устройств ESPHome и их статусов", mime_type="application/json")
+async def resource_devices() -> str:
+    """
+    Ресурс: Список всех устройств ESPHome с их IP-адресами, статусом онлайн/офлайн и версиями.
+    """
+    url = get_ws_url(DEFAULT_HOST, DEFAULT_PORT)
+    msg_id = "res_dev_1"
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return json.dumps({"error": "requires_auth", "message": "ESPHome требует аутентификацию"}, ensure_ascii=False)
+
+            await ws.send(json.dumps({
+                "command": "devices/list",
+                "message_id": msg_id,
+                "args": {}
+            }))
+
+            async for message in ws:
+                data = json.loads(message)
+                if data.get("message_id") != msg_id:
+                    continue
+                if data.get("error_code"):
+                    return json.dumps({"error": data.get("error_code"), "details": data.get("details", data)}, ensure_ascii=False)
+
+                result = data.get("result", {})
+                devices = result.get("configured", result.get("devices", [])) if isinstance(result, dict) else (result if isinstance(result, list) else [])
+
+                # Дополнительно опрашиваем devices/get_states для получения актуальных статусов
+                states_map = {}
+                try:
+                    st_id = "res_dev_st_1"
+                    await ws.send(json.dumps({"command": "devices/get_states", "message_id": st_id, "args": {}}))
+                    st_data = json.loads(await asyncio.wait_for(ws.recv(), timeout=3.0))
+                    if not st_data.get("error_code"):
+                        states_map = st_data.get("result", {}) or {}
+                except Exception:
+                    pass
+
+                structured = []
+                for dev in devices:
+                    if not isinstance(dev, dict):
+                        continue
+                    cfg = dev.get("configuration", "")
+                    name = dev.get("name", "")
+                    runtime = dev.get("runtime_state", {}) or {}
+                    st_val = states_map.get(cfg)
+                    if isinstance(st_val, str):
+                        state = st_val
+                    elif isinstance(st_val, dict):
+                        state = st_val.get("state", runtime.get("state", "unknown"))
+                    else:
+                        state = runtime.get("state") or dev.get("state", "unknown")
+                    ip_list = runtime.get("ip_addresses", [])
+                    structured.append({
+                        "name": name,
+                        "configuration": cfg,
+                        "friendly_name": dev.get("friendly_name") or name,
+                        "status": state,
+                        "ip_addresses": ip_list,
+                        "deployed_version": runtime.get("deployed_version", dev.get("current_version", "")),
+                        "board": dev.get("board", runtime.get("board", "")),
+                        "platform": dev.get("platform", runtime.get("platform", "")),
+                        "has_pending_changes": dev.get("has_pending_changes", False),
+                        "labels": dev.get("labels", [])
+                    })
+
+                return json.dumps({
+                    "total": len(structured),
+                    "devices": structured
+                }, indent=2, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"Ошибка получения ресурса esphome://devices: {e}")
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+@mcp.resource("esphome://configs/{configuration}", name="device_configuration", description="Исходная YAML-конфигурация устройства ESPHome", mime_type="text/yaml")
+async def resource_device_config(configuration: str) -> str:
+    """
+    Ресурс: Получение исходной YAML-конфигурации устройства по имени файла.
+    """
+    cfg_name = resolve_configuration(configuration)
+    url = get_ws_url(DEFAULT_HOST, DEFAULT_PORT)
+    msg_id = f"res_cfg_{cfg_name}"
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return f"# Ошибка: ESPHome на {DEFAULT_HOST}:{DEFAULT_PORT} требует авторизацию."
+
+            await ws.send(json.dumps({
+                "command": "devices/get_config",
+                "message_id": msg_id,
+                "args": {"configuration": cfg_name}
+            }))
+
+            async for message in ws:
+                data = json.loads(message)
+                if data.get("message_id") != msg_id:
+                    continue
+                if data.get("error_code"):
+                    return f"# Ошибка получения конфигурации {cfg_name}: {data.get('details', data)}"
+                result = data.get("result", "")
+                return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"Ошибка получения ресурса esphome://configs/{cfg_name}: {e}")
+        return f"# Ошибка чтения конфигурации {cfg_name}: {str(e)}"
+
+
+@mcp.resource("esphome://components/{component_id}", name="component_schema", description="Схема настроек и паспорт компонента ESPHome (config_entries, шины, зависимости)", mime_type="application/json")
+async def resource_component_schema(component_id: str) -> str:
+    """
+    Ресурс: Паспорт и схема параметров компонента ESPHome.
+    """
+    cid = component_id.strip()
+    url = get_ws_url(DEFAULT_HOST, DEFAULT_PORT)
+    msg_id = f"res_comp_{cid}"
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return json.dumps({"error": "requires_auth", "message": "ESPHome требует аутентификацию"}, ensure_ascii=False)
+
+            await ws.send(json.dumps({
+                "command": "components/get_component_bodies",
+                "message_id": msg_id,
+                "args": {"component_ids": [cid]}
+            }))
+
+            async for message in ws:
+                data = json.loads(message)
+                if data.get("message_id") != msg_id:
+                    continue
+                if data.get("error_code"):
+                    return json.dumps({"error": data.get("error_code"), "details": data.get("details", data)}, ensure_ascii=False)
+                res = data.get("result", {})
+                if isinstance(res, dict) and cid in res:
+                    return json.dumps(res[cid], indent=2, ensure_ascii=False)
+                elif isinstance(res, dict) and res:
+                    return json.dumps(res, indent=2, ensure_ascii=False)
+                return json.dumps({"component_id": cid, "message": "Компонент не найден"}, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"Ошибка получения ресурса esphome://components/{cid}: {e}")
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+@mcp.resource("esphome://boards/{board_id}", name="board_pinout", description="Паспорт платы микроконтроллера и распиновка GPIO (pinout)", mime_type="application/json")
+async def resource_board_pinout(board_id: str) -> str:
+    """
+    Ресурс: Паспорт платы и аппаратная распиновка пинов.
+    """
+    bid = board_id.strip()
+    url = get_ws_url(DEFAULT_HOST, DEFAULT_PORT)
+    msg_id = f"res_board_{bid}"
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            first_msg = json.loads(first_msg_raw)
+            if first_msg.get("requires_auth"):
+                return json.dumps({"error": "requires_auth", "message": "ESPHome требует аутентификацию"}, ensure_ascii=False)
+
+            await ws.send(json.dumps({
+                "command": "boards/get_board",
+                "message_id": msg_id,
+                "args": {"board_id": bid}
+            }))
+
+            async for message in ws:
+                data = json.loads(message)
+                if data.get("message_id") != msg_id:
+                    continue
+                if data.get("error_code"):
+                    return json.dumps({"error": data.get("error_code"), "details": data.get("details", data)}, ensure_ascii=False)
+                result = data.get("result", {})
+                return json.dumps(result, indent=2, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"Ошибка получения ресурса esphome://boards/{bid}: {e}")
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+# ==============================================================================
+# РАЗДЕЛ: ИНТЕРАКТИВНЫЕ ПРОМПТЫ MCP (MCP Prompts, Фаза 4.2)
+# ==============================================================================
+
+@mcp.prompt(name="new_device_wizard", description="Интерактивный мастер проектирования и создания нового устройства ESPHome")
+def prompt_new_device_wizard(
+    board_id: str = "",
+    device_name: str = "",
+    friendly_name: str = "",
+    components: str = ""
+) -> str:
+    """
+    Промпт: Мастер проектирования и создания нового устройства ESPHome.
+    """
+    b_info = f"`{board_id}`" if board_id else "не указана (уточни у пользователя или подбери через get_board_info)"
+    d_name = f"`{device_name}`" if device_name else "не указано (сгенерируй подходящее имя в kebab-case)"
+    f_name = f"`{friendly_name}`" if friendly_name else "не указано"
+    c_list = f"`{components}`" if components else "не указаны"
+
+    return f"""Ты — ведущий инженер по встраиваемым системам и конфигурации устройств ESPHome.
+Пользователь обратился с задачей спроектировать и подготовить новое устройство умного дома.
+
+📋 Параметры целевого устройства:
+- Идентификатор платы (board_id): {b_info}
+- Имя конфигурации (device_name): {d_name}
+- Дружественное имя (friendly_name): {f_name}
+- Требуемые компоненты / датчики: {c_list}
+
+Выполни пошаговое проектирование строго по следующему регламенту:
+1. **Аудит платы и аппаратных пинов:**
+   - Если плата задана, изучи её распиновку через ресурс `esphome://boards/{board_id or 'esp32dev'}` или инструмент `get_board_info(action="get")`.
+   - Выяви доступные GPIO, исключая служебные пины SPI Flash (GPIO6-11 на ESP32) и strapping-пины.
+2. **Проверка спецификаций компонентов:**
+   - Для каждого датчика проверь паспорт через `esphome://components/<component_id>` или `search_components(action="get")`.
+   - Определи требования к шинам (I2C SDA/SCL, SPI MOSI/MISO/CLK, UART TX/RX) и выдели неконфликтующие пины.
+3. **Генерация конфигурации:**
+   - Создай файл конфигурации через `manage_device_config(action="create")` с шаблоном платы и безопасным Wi-Fi через secrets.
+   - Либо добавь компоненты по очереди через `manage_device_config(action="add_component")`.
+4. **Валидация синтаксиса:**
+   - Обязательно запусти `validate_yaml` для проверки целостности созданного конфига.
+5. **Тестовая сборка и аудит памяти:**
+   - Скомпилируй прошивку через `compile_firmware` и оцени расход памяти через `manage_build_jobs(action="analyze_memory")`.
+
+Предоставь пользователю итоговый отчет с описанием подключения датчиков к пинам платы и готовностью к прошивке."""
+
+
+@mcp.prompt(name="troubleshoot_offline_device", description="Пошаговый чеклист автономной диагностики причин недоступности (offline) устройства")
+def prompt_troubleshoot_offline_device(configuration: str) -> str:
+    """
+    Промпт: Автономная диагностика оффлайн-устройства ESPHome.
+    """
+    cfg = resolve_configuration(configuration)
+    return f"""Ты — дежурный сетевой инженер и специалист по диагностике оборудования ESPHome.
+Устройство `{cfg}` в настоящий момент не выходит на связь (статус Offline) или испытывает сетевые сбои.
+
+Выполни глубокое автономное расследование по следующему чеклисту:
+1. **Сетевой зонд (L3 / L4 / mDNS):**
+   - Вызови инструмент `troubleshoot_device(action="probe", configuration="{cfg}")`.
+   - Проанализируй:
+     * Доступен ли узел по ICMP Ping и каково время отклика (RTT)?
+     * Резолвится ли имя хоста через локальный DNS и через mDNS Zeroconf?
+     * Нет ли расхождения между кэшированным IP и текущим адресом?
+2. **Анализ истории версий и недавних правок (Git History):**
+   - Проверь историю коммитов через `manage_version_history(action="list_versions", configuration="{cfg}", max_count=5)`.
+   - Проверь последний diff через `manage_version_history(action="get_diff", configuration="{cfg}")`: какие правки вносились в Wi-Fi, статические IP, шины или интервалы опроса перед сбоем?
+3. **Анализ логов и дампов паники:**
+   - Если устройство перезагружается в Bootloop, запроси логи запуска через `stream_device_logs(configuration="{cfg}", duration_seconds=5, no_states=True)`.
+   - При обнаружении паники ядра (Guru Meditation / Fatal exception) расшифруй дамп через `decode_crash_backtrace(configuration="{cfg}", lines=...)`.
+4. **Формулирование диагноза и мер восстановления:**
+   - Предоставь пользователю точный диагноз причины сбоя.
+   - Если проблема программная, предложи немедленный безопасный откат на стабильную ревизию через `manage_version_history(action="restore", configuration="{cfg}", sha=...)`."""
+
+
+@mcp.prompt(name="safe_firmware_upgrade", description="Регламент безопасного обновления прошивки ESPHome без риска сбоя")
+def prompt_safe_firmware_upgrade(configuration: str, target_port: str = "OTA") -> str:
+    """
+    Промпт: Регламент безопасного обновления прошивки.
+    """
+    cfg = resolve_configuration(configuration)
+    return f"""Ты — старший инженер по релиз-менеджменту и обновлению парка устройств ESPHome.
+Требуется провести процедуру безопасного обновления прошивки для устройства `{cfg}` (целевой адрес/порт: `{target_port}`).
+
+Строго следуй регламенту с нулевым риском потери контроля над устройством:
+1. **Предварительный аудит узла (Health Check):**
+   - Проверь доступность устройства через `troubleshoot_device(action="probe", configuration="{cfg}")` или `list_devices`.
+   - Убедись, что узел находится онлайн и уровень сигнала Wi-Fi достаточен для устойчивой OTA-передачи.
+2. **Фиксация точки отката (Safety Snapshot):**
+   - Убедись, что текущее рабочее состояние зафиксировано в истории: `manage_version_history(action="list_versions", configuration="{cfg}")`.
+3. **Валидация YAML-конфигурации:**
+   - Запусти валидацию через `validate_yaml(configuration="{cfg}")`.
+   - При наличии устаревших директив проведи автомиграцию синтаксиса через `migrate_device_config(configuration="{cfg}")`.
+4. **Сборка и аудит разделов памяти:**
+   - Запусти компиляцию без загрузки: `compile_firmware(configuration="{cfg}")`.
+   - Оцени профиль памяти через `manage_build_jobs(action="analyze_memory", configuration="{cfg}")`: убедись, что размер бинарника не превышает лимиты OTA-партиции.
+5. **OTA-прошивка:**
+   - Запусти прошивку через `flash_ota(configuration="{cfg}", port="{target_port}")`.
+   - Дождись успешного завершения передачи.
+6. **Верификация старта (Post-Flash Verification):**
+   - Подключись к потоку логов устройства через `stream_device_logs(configuration="{cfg}", duration_seconds=10, no_states=True)`.
+   - Убедись в штатном запуске компонентов, успешном подключении к сети и отсутствии циклов перезагрузок."""
+
+
+# ==============================================================================
+# ФАЗА 5: АППАРАТНЫЙ АУДИТ И БЕЗОПАСНОСТЬ РАСПИНОВКИ (Phase 5.1.1)
+# ==============================================================================
+
+def normalize_gpio(pin_val: str | int) -> int | None:
+    """Нормализует строковое или числовое представление GPIO к целому числу."""
+    if isinstance(pin_val, int):
+        return pin_val
+    if not pin_val:
+        return None
+    s = str(pin_val).strip().upper().strip('"\'')
+    if s.startswith("GPIO"):
+        s = s[4:].strip()
+    d_map = {
+        "D0": 16, "D1": 5, "D2": 4, "D3": 0, "D4": 2,
+        "D5": 14, "D6": 12, "D7": 13, "D8": 15, "D9": 3, "D10": 1
+    }
+    if s in d_map:
+        return d_map[s]
+    try:
+        return int(s)
+    except ValueError:
+        return None
+
+
+def analyze_yaml_pinout_and_rules(
+    yaml_text: str,
+    board_id_override: str = "",
+    board_info: dict | None = None
+) -> dict:
+    """
+    Выполняет статический анализ YAML-конфигурации: извлекает используемые пины,
+    роли компонентов, I2C адреса и сопоставляет с аппаратной матрицей ограничений.
+    """
+    substitutions: dict[str, str] = {}
+    lines = yaml_text.splitlines()
+
+    # 1. Извлекаем substitutions
+    in_subst = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped == "substitutions:":
+            in_subst = True
+            continue
+        if in_subst:
+            if not line.startswith(" ") and not line.startswith("\t"):
+                in_subst = False
+            else:
+                m = re.match(r"^\s*([a-zA-Z0-9_-]+):\s*[\"']?([^\"'#\n]+)[\"']?", line)
+                if m:
+                    substitutions[m.group(1).strip()] = m.group(2).strip()
+
+    def resolve_subst(val: str) -> str:
+        if not isinstance(val, str):
+            return val
+        for k, v in substitutions.items():
+            val = val.replace(f"${{{k}}}", v).replace(f"${k}", v)
+        return val
+
+    # 2. Определяем платформу и целевую плату
+    platform = "esp32"
+    board_id = board_id_override
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if stripped.startswith("esp32:"):
+            platform = "esp32"
+        elif stripped.startswith("esp8266:"):
+            platform = "esp8266"
+        elif stripped.startswith("rp2040:"):
+            platform = "rp2040"
+
+        m_board = re.search(r"^\s*board:\s*[\"']?([^\"'#\n]+)[\"']?", line)
+        if m_board and not board_id:
+            board_id = resolve_subst(m_board.group(1).strip())
+
+    # 3. Извлекаем пины и адреса I2C
+    used_pins: list[dict] = []
+    i2c_devices: list[dict] = []
+
+    current_section = ""
+    current_platform = ""
+    current_comp_id = ""
+
+    pin_regex = re.compile(
+        r"^\s*(sda|scl|clk_pin|mosi_pin|miso_pin|cs_pin|tx_pin|rx_pin|data_pin|clock_pin|echo_pin|trigger_pin|reset_pin|rst_pin|pin|number):\s*[\"']?([^\"'#\n]+)[\"']?",
+        re.IGNORECASE
+    )
+    addr_regex = re.compile(r"^\s*address:\s*[\"']?(0x[0-9a-fA-F]+|[0-9]+)[\"']?", re.IGNORECASE)
+
+    for idx, raw_line in enumerate(lines, 1):
+        line = raw_line.split("#")[0].rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Секция верхнего уровня
+        if not raw_line.startswith(" ") and not raw_line.startswith("\t") and ":" in stripped:
+            sec = stripped.split(":")[0].strip()
+            current_section = sec
+            current_platform = ""
+            current_comp_id = ""
+            continue
+
+        # Вложенная platform
+        m_plat = re.match(r"^\s*-\s*platform:\s*([a-zA-Z0-9_-]+)", line) or re.match(r"^\s*platform:\s*([a-zA-Z0-9_-]+)", line)
+        if m_plat:
+            current_platform = m_plat.group(1).strip()
+
+        m_id = re.match(r"^\s*id:\s*([a-zA-Z0-9_-]+)", line)
+        if m_id:
+            current_comp_id = m_id.group(1).strip()
+
+        # Поиск I2C адреса
+        m_addr = addr_regex.search(line)
+        if m_addr:
+            raw_addr = m_addr.group(1).strip()
+            try:
+                addr_int = int(raw_addr, 16) if raw_addr.lower().startswith("0x") else int(raw_addr)
+                addr_hex = f"0x{addr_int:02X}"
+                comp_name = current_comp_id or current_platform or current_section or f"line_{idx}"
+                i2c_devices.append({
+                    "address": addr_hex,
+                    "address_int": addr_int,
+                    "component": comp_name,
+                    "line_number": idx
+                })
+            except ValueError:
+                pass
+
+        # Поиск директив пинов
+        m_pin = pin_regex.search(line)
+        if m_pin:
+            field_name = m_pin.group(1).lower()
+            raw_val = resolve_subst(m_pin.group(2).strip())
+            gpio_num = normalize_gpio(raw_val)
+            if gpio_num is not None:
+                if field_name == "sda":
+                    role = "I2C SDA"
+                elif field_name == "scl":
+                    role = "I2C SCL"
+                elif field_name in ("tx_pin", "tx"):
+                    role = "UART TX"
+                elif field_name in ("rx_pin", "rx"):
+                    role = "UART RX"
+                elif field_name in ("clk_pin", "mosi_pin", "cs_pin"):
+                    role = "SPI OUT"
+                elif field_name == "miso_pin":
+                    role = "SPI IN"
+                elif current_section in ("switch", "output", "light"):
+                    role = "OUTPUT"
+                elif current_platform == "adc":
+                    role = "ADC"
+                elif current_section in ("binary_sensor", "sensor"):
+                    role = "INPUT"
+                else:
+                    role = "GPIO"
+
+                comp_name = current_comp_id or current_platform or current_section or f"line_{idx}"
+                used_pins.append({
+                    "gpio": gpio_num,
+                    "role": role,
+                    "component": comp_name,
+                    "field": field_name,
+                    "line_number": idx
+                })
+
+    # 4. База аппаратных ограничений
+    FLASH_PINS = {
+        "esp32": {6, 7, 8, 9, 10, 11},
+        "esp8266": {6, 7, 8, 9, 10, 11},
+        "esp32c3": {12, 13, 14, 15, 16, 17},
+        "esp32s3": {26, 27, 28, 29, 30, 31, 32}
+    }
+    INPUT_ONLY_PINS = {
+        "esp32": {34, 35, 36, 39}
+    }
+    STRAPPING_PINS = {
+        "esp32": {
+            0: "Boot mode select (должен быть HIGH/Floating для нормального старта)",
+            2: "Boot mode select (должен быть LOW/Floating для старта из Flash)",
+            12: "MTDI — критический выбор напряжения Flash (3.3V vs 1.8V). Высокий уровень при старте может сжечь чип/память!",
+            15: "MTDO — управление тишиной логов загрузчика"
+        },
+        "esp8266": {
+            0: "Boot mode (HIGH для старта, LOW для прошивки)",
+            2: "Boot mode (HIGH для старта)",
+            15: "Boot mode (должен быть LOW при старте)"
+        }
+    }
+    ADC2_PINS = {
+        "esp32": {0, 2, 4, 12, 13, 14, 15, 25, 26, 27}
+    }
+
+    board_flash_pins = set()
+    board_input_only = set()
+    board_strapping = {}
+    board_pin_notes = {}
+
+    if board_info and isinstance(board_info, dict):
+        for p in board_info.get("pins", []):
+            g = p.get("gpio")
+            if g is None:
+                continue
+            if p.get("available") is False and "flash" in p.get("occupied_by", "").lower():
+                board_flash_pins.add(g)
+            feats = [f.lower() for f in p.get("features", [])]
+            if "input_only" in feats:
+                board_input_only.add(g)
+            if "strapping" in feats:
+                board_strapping[g] = p.get("notes", "Strapping pin")
+            if p.get("notes"):
+                board_pin_notes[g] = p.get("notes")
+
+    effective_flash = board_flash_pins or FLASH_PINS.get(platform, set())
+    effective_input_only = board_input_only or INPUT_ONLY_PINS.get(platform, set())
+    effective_strapping = board_strapping or STRAPPING_PINS.get(platform, {})
+
+    fatal_errors = []
+    warnings = []
+
+    # Проверка 1: Flash Pins (FATAL)
+    for p in used_pins:
+        g = p["gpio"]
+        if g in effective_flash:
+            fatal_errors.append(
+                f"❌ **Критический конфликт SPI Flash (GPIO{g}):** Пин назначен компоненту `{p['component']}` (строка {p['line_number']}). "
+                f"На платформе {platform.upper()} пины {sorted(list(effective_flash))} зарезервированы под встроенную SPI Flash память. "
+                f"Использование GPIO{g} приведет к аппаратному сбою шины SPI и бесконечному циклу перезагрузок (bootloop)!"
+            )
+
+    # Проверка 2: Input-Only Pins в роли выходов (FATAL)
+    for p in used_pins:
+        g = p["gpio"]
+        role = p["role"]
+        if g in effective_input_only and role in ("OUTPUT", "SPI OUT", "I2C SDA", "I2C SCL", "UART TX"):
+            fatal_errors.append(
+                f"❌ **Аппаратная невозможность вывода (GPIO{g}):** Пин назначен как `{role}` для компонента `{p['component']}` (строка {p['line_number']}). "
+                f"На платформе {platform.upper()} GPIO{g} является физически Input-only (нет выходных драйверов и подтяжек) и не может работать как выход или шина I2C!"
+            )
+
+    # Проверка 3: Дублирование пинов между компонентами (FATAL)
+    pin_usage: dict[int, list[dict]] = {}
+    for p in used_pins:
+        g = p["gpio"]
+        if g not in pin_usage:
+            pin_usage[g] = []
+        pin_usage[g].append(p)
+
+    for g, usages in pin_usage.items():
+        if len(usages) > 1:
+            comps = [f"`{u['component']}` ({u['role']}, строка {u['line_number']})" for u in usages]
+            fatal_errors.append(
+                f"❌ **Конфликт повторного использования (GPIO{g}):** Пин одновременно назначен нескольким компонентам:\n  - " + "\n  - ".join(comps)
+            )
+
+    # Проверка 4: Коллизии адресов I2C (FATAL)
+    addr_usage: dict[str, list[dict]] = {}
+    for dev in i2c_devices:
+        a = dev["address"]
+        if a not in addr_usage:
+            addr_usage[a] = []
+        addr_usage[a].append(dev)
+
+    for a, devs in addr_usage.items():
+        if len(devs) > 1:
+            dev_list = [f"`{d['component']}` (строка {d['line_number']})" for d in devs]
+            fatal_errors.append(
+                f"❌ **Коллизия адресов шины I2C ({a}):** Несколько устройств на одной шине имеют одинаковый I2C адрес:\n  - " + "\n  - ".join(dev_list) +
+                f"\n  *Рекомендация:* Измените адрес через аппаратный пин ADDR датчика либо используйте мультиплексор TCA9548A."
+            )
+
+    # Проверка 5: Strapping Pins (WARNING)
+    for p in used_pins:
+        g = p["gpio"]
+        if g in effective_strapping:
+            note = effective_strapping[g]
+            warnings.append(
+                f"⚠️ **Предостережение: Strapping Pin (GPIO{g}):** Назначен компоненту `{p['component']}` (строка {p['line_number']}). "
+                f"GPIO{g} участвует в выборе режима загрузки контроллера ({note}). Убедитесь, что внешняя схема не удерживает неверный уровень напряжения при старте питания."
+            )
+
+    # Проверка 6: ADC2 & Wi-Fi conflict (WARNING)
+    for p in used_pins:
+        g = p["gpio"]
+        if p["role"] == "ADC" and g in ADC2_PINS.get(platform, set()):
+            warnings.append(
+                f"⚠️ **Конфликт АЦП ADC2 с Wi-Fi (GPIO{g}):** Пин используется для аналогового считывания `{p['component']}`. "
+                f"На ESP32 блок ADC2 аппаратным образом блокируется модулем Wi-Fi. При активном Wi-Fi показания будут сбоить. Рекомендуется перенести датчик на блок ADC1 (GPIO32–GPIO39)."
+            )
+
+    status = "FAILED" if fatal_errors else ("WARNINGS" if warnings else "PASSED")
+
+    return {
+        "status": status,
+        "platform": platform,
+        "board_id": board_id,
+        "used_pins": used_pins,
+        "i2c_devices": i2c_devices,
+        "board_pin_notes": board_pin_notes,
+        "fatal_errors": fatal_errors,
+        "warnings": warnings
+    }
+
+
+@mcp.tool()
+async def validate_hardware_pinout(
+    configuration: str = "",
+    content: str = "",
+    board_id: str = "",
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT
+) -> str:
+    """
+    Инструмент 28 (Phase 5.1.1): Интеллектуальный аппаратный аудит распиновки GPIO и коллизий шин.
+
+    Проверяет YAML-конфигурацию на критические аппаратные конфликты:
+      - Зарезервированные пины SPI Flash памяти (GPIO6-GPIO11 на ESP32)
+      - Назначение физически входных (Input-only GPIO34-GPIO39) пинов в качестве выходов/ШИМ/I2C
+      - Конфликты Strapping-пинов режима начальной загрузки (GPIO0, GPIO2, GPIO12, GPIO15)
+      - Конфликты аналоговых каналов блока ADC2 при одновременной работе с Wi-Fi
+      - Дублирование аппаратных пинов между несколькими компонентами
+      - Аппаратные коллизии одинаковых адресов нескольких датчиков на одной шине I2C
+
+    Параметры:
+      - configuration: имя файла конфигурации устройства (например, "test.yaml")
+      - content:       опциональный сырой текст YAML для проверки до сохранения
+      - board_id:      опциональный ID платы (например, "esp32dev", "d1_mini", "nodemcu-32s")
+      - host:          хост сервера ESPHome
+      - port:          сетевой порт WebSocket API ESPHome
+    """
+    if not configuration and not content:
+        return "Ошибка: необходимо указать либо параметр configuration (имя файла), либо content (текст YAML)."
+
+    url = get_ws_url(host, port)
+    yaml_text = content
+    target_config = resolve_configuration(configuration) if configuration else ""
+
+    # Если content не задан, считываем YAML через devices/get_config
+    if not yaml_text and target_config:
+        try:
+            async with websockets.connect(url, ping_interval=None) as ws:
+                first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                first_msg = json.loads(first_msg_raw)
+                if first_msg.get("requires_auth"):
+                    return f"Ошибка: ESPHome на {host}:{port} требует аутентификации (requires_auth=true)."
+
+                msg_id = "pinout_get_cfg_1"
+                await ws.send(json.dumps({
+                    "command": "devices/get_config",
+                    "message_id": msg_id,
+                    "args": {"configuration": target_config}
+                }))
+
+                async for message in ws:
+                    data = json.loads(message)
+                    if data.get("message_id") != msg_id:
+                        continue
+                    if data.get("error_code"):
+                        return f"Ошибка получения конфигурации {target_config}: {data.get('details', data)}"
+                    res = data.get("result", "")
+                    yaml_text = res if isinstance(res, str) else json.dumps(res)
+                    break
+
+        except Exception as e:
+            return f"Критическая ошибка получения конфигурации {target_config} ({url}): {str(e)}"
+
+    if not yaml_text:
+        return f"Ошибка: не удалось прочитать содержимое конфигурации `{target_config}`."
+
+    # Пытаемся получить паспорт платы через boards/get_board для расширения распиновки
+    board_info = None
+    target_board = board_id
+
+    # Если board_id не передан явно, извлекаем его предварительно из YAML
+    if not target_board:
+        m = re.search(r"^\s*board:\s*[\"']?([^\"'#\n]+)[\"']?", yaml_text, re.MULTILINE)
+        if m:
+            target_board = m.group(1).strip()
+            m_sub = re.search(r"substitutions:\s*\n((?:\s+[a-zA-Z0-9_-]+:\s*[^\n]+\n)+)", yaml_text)
+            if m_sub and "${" in target_board:
+                for line in m_sub.group(1).splitlines():
+                    sm = re.match(r"^\s*([a-zA-Z0-9_-]+):\s*[\"']?([^\"'#\n]+)[\"']?", line)
+                    if sm:
+                        target_board = target_board.replace(f"${{{sm.group(1).strip()}}}", sm.group(2).strip())
+
+    if target_board and not target_board.startswith("$"):
+        try:
+            async with websockets.connect(url, ping_interval=None) as ws:
+                await asyncio.wait_for(ws.recv(), timeout=2.0)
+                b_id = "pinout_get_board_1"
+                await ws.send(json.dumps({
+                    "command": "boards/get_board",
+                    "message_id": b_id,
+                    "args": {"board_id": target_board}
+                }))
+                data = json.loads(await asyncio.wait_for(ws.recv(), timeout=3.0))
+                if not data.get("error_code"):
+                    board_info = data.get("result", {})
+        except Exception:
+            pass
+
+    # Выполняем анализ
+    res = analyze_yaml_pinout_and_rules(yaml_text, board_id_override=target_board, board_info=board_info)
+
+    status = res["status"]
+    platform = res["platform"]
+    board_name = res["board_id"] or target_board or "не определена"
+    used_pins = res["used_pins"]
+    i2c_devices = res["i2c_devices"]
+    fatal_errors = res["fatal_errors"]
+    warnings = res["warnings"]
+    pin_notes = res.get("board_pin_notes", {})
+
+    status_badge = {
+        "PASSED": "🟢 **PASSED (Аппаратных коллизий не обнаружено)**",
+        "WARNINGS": "🟡 **WARNINGS (Обнаружены предупреждения и аппаратные нюансы)**",
+        "FAILED": "🔴 **FAILED (ОБНАРУЖЕНЫ КРИТИЧЕСКИЕ АППАРАТНЫЕ ОШИБКИ)**"
+    }.get(status, status)
+
+    header = f"### ⚡ Аппаратный аудит распиновки GPIO (validate_hardware_pinout)\n\n"
+    header += f"- **Целевая конфигурация:** `{target_config or 'переданный текст YAML'}`\n"
+    header += f"- **Платформа:** `{platform.upper()}` | **Плата:** `{board_name}`\n"
+    header += f"- **Итоговый вердикт:** {status_badge}\n\n"
+
+    output = [header]
+
+    # Сводная таблица используемых пинов
+    output.append(f"#### 📋 Задействованные пины GPIO ({len(used_pins)} шт.):\n")
+    if not used_pins:
+        output.append("*В конфигурации не обнаружено явных определений аппаратных пинов.*")
+    else:
+        output.append("| GPIO | Роль в схеме | Компонент | Строка | Аппаратные примечания |")
+        output.append("|:---:|:---:|---|:---:|---|")
+        for p in sorted(used_pins, key=lambda x: x["gpio"]):
+            g = p["gpio"]
+            note = pin_notes.get(g, "")
+            output.append(f"| **GPIO{g}** | `{p['role']}` | `{p['component']}` | {p['line_number']} | {note} |")
+
+    # Сводка по I2C
+    if i2c_devices:
+        output.append(f"\n#### 🔍 Устройства на шине I2C ({len(i2c_devices)} шт.):\n")
+        output.append("| I2C Адрес | Компонент | Строка | Статус |")
+        output.append("|:---:|---|:---:|---|")
+        seen_addrs = set()
+        dup_addrs = set()
+        for d in i2c_devices:
+            if d["address"] in seen_addrs:
+                dup_addrs.add(d["address"])
+            seen_addrs.add(d["address"])
+
+        for d in i2c_devices:
+            st = "❌ **КОЛЛИЗИЯ**" if d["address"] in dup_addrs else "🟢 OK"
+            output.append(f"| `{d['address']}` | `{d['component']}` | {d['line_number']} | {st} |")
+
+    # Секция критических ошибок
+    if fatal_errors:
+        output.append("\n---\n### ❌ Критические аппаратные конфликты (FATAL):")
+        output.append("> ⛔ **Внимание:** Компиляция и прошивка конфигурации с данными ошибками приведет к сбою загрузки микроконтроллера!\n")
+        for err in fatal_errors:
+            output.append(f"- {err}\n")
+
+    # Секция предупреждений
+    if warnings:
+        output.append("\n---\n### ⚠️ Предостережения и рекомендации (WARNINGS):\n")
+        for w in warnings:
+            output.append(f"- {w}\n")
+
+    return "\n".join(output)
+
+
+# =========================================================================
+# ФАЗА 5.3: БЕЗОПАСНАЯ CANARY OTA-ПРОШИВКА С АВТО-ОТКАТОМ ПРИ BOOTLOOP
+# =========================================================================
+
+def analyze_canary_health(logs: list[str]) -> dict:
+    """
+    Анализирует строки лога первого запуска на маркеры фатальных аварий и бутлупа:
+      - Guru Meditation Panic / Core Dump
+      - Backtrace Stack
+      - abort() / assert failed
+      - WDT Reset (Panic / Task Watchdog)
+      - Вход в Safe Mode ESPHome
+      - Повреждение динамической памяти (Heap Corruption)
+      - Множественные рестарты (Bootloop)
+    """
+    crash_markers: list[str] = []
+    backtrace_lines: list[str] = []
+    reset_count = 0
+    in_safe_mode = False
+
+    guru_re = re.compile(r"Guru Meditation Error|Core\s+\d+\s+panic", re.IGNORECASE)
+    bt_re = re.compile(r"Backtrace:\s*(0x[0-9a-fA-F]+:0x[0-9a-fA-F]+\s*)+", re.IGNORECASE)
+    abort_re = re.compile(r"abort\(\) was called|assert(?:ion)?\s+.*failed", re.IGNORECASE)
+    wdt_re = re.compile(r"rst:0x[0-9a-fA-F]+\s*\((?:TG[01]WDT_SYS_RESET|RTCWDT_RTC_RESET|PANIC)\)", re.IGNORECASE)
+    safe_re = re.compile(r"ESPHome is in safe mode|Unresolved crash loop detected", re.IGNORECASE)
+    heap_re = re.compile(r"CORRUPT HEAP|heap_caps_alloc failed", re.IGNORECASE)
+    rst_any_re = re.compile(r"rst:0x[0-9a-fA-F]+|Booting ESPHome", re.IGNORECASE)
+
+    for line in logs:
+        clean_line = line.strip()
+        if not clean_line:
+            continue
+        if guru_re.search(clean_line):
+            crash_markers.append(f"Guru Meditation Panic: `{clean_line}`")
+        if bt_re.search(clean_line):
+            backtrace_lines.append(clean_line)
+            crash_markers.append(f"Backtrace Stack: `{clean_line}`")
+        if abort_re.search(clean_line):
+            crash_markers.append(f"Assertion/Abort: `{clean_line}`")
+        if wdt_re.search(clean_line):
+            crash_markers.append(f"Watchdog Reset: `{clean_line}`")
+        if safe_re.search(clean_line):
+            in_safe_mode = True
+            crash_markers.append(f"Safe Mode Triggered: `{clean_line}`")
+        if heap_re.search(clean_line):
+            crash_markers.append(f"Heap Corruption: `{clean_line}`")
+        if rst_any_re.search(clean_line):
+            reset_count += 1
+
+    if reset_count > 2:
+        crash_markers.append(f"Bootloop Detection: обнаружено {reset_count} циклов рестарта за период наблюдения")
+
+    is_healthy = len(crash_markers) == 0 and not in_safe_mode
+
+    return {
+        "is_healthy": is_healthy,
+        "crash_markers": crash_markers,
+        "backtrace_lines": backtrace_lines,
+        "reset_count": reset_count,
+        "in_safe_mode": in_safe_mode,
+        "total_lines": len(logs)
+    }
+
+
+async def _get_raw_device_config(host: str, port: int, configuration: str) -> tuple[bool, str]:
+    """Вспомогательная функция считывания сырого YAML устройства через devices/get_config."""
+    url = get_ws_url(host, port)
+    msg_id = f"canary_get_cfg_{uuid.uuid4().hex[:8]}"
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
+            if first_msg.get("requires_auth"):
+                return False, "requires_auth"
+            await ws.send(json.dumps({
+                "command": "devices/get_config",
+                "message_id": msg_id,
+                "args": {"configuration": configuration}
+            }))
+            async for message in ws:
+                data = json.loads(message)
+                if data.get("message_id") == msg_id:
+                    if data.get("error_code"):
+                        return False, str(data.get("details", data))
+                    return True, str(data.get("result", ""))
+    except Exception as e:
+        return False, str(e)
+    return False, "timeout"
+
+
+async def _update_raw_device_config(host: str, port: int, configuration: str, content: str) -> tuple[bool, str]:
+    """Вспомогательная функция записи сырого YAML через devices/update_config."""
+    url = get_ws_url(host, port)
+    msg_id = f"canary_upd_cfg_{uuid.uuid4().hex[:8]}"
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
+            if first_msg.get("requires_auth"):
+                return False, "requires_auth"
+            await ws.send(json.dumps({
+                "command": "devices/update_config",
+                "message_id": msg_id,
+                "args": {"configuration": configuration, "content": content, "allow_wipe": True}
+            }))
+            async for message in ws:
+                data = json.loads(message)
+                if data.get("message_id") == msg_id:
+                    if data.get("error_code"):
+                        return False, str(data.get("details", data))
+                    return True, "OK"
+    except Exception as e:
+        return False, str(e)
+    return False, "timeout"
+
+
+async def _collect_device_logs(host: str, port: int, configuration: str, target_port: str, duration_seconds: int = 15) -> list[str]:
+    """Вспомогательная функция сторожевого сбора логов устройства за заданный интервал времени."""
+    url = get_ws_url(host, port)
+    msg_id = f"canary_watch_logs_{uuid.uuid4().hex[:8]}"
+    output_lines: list[str] = []
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
+            if first_msg.get("requires_auth"):
+                return ["ERROR: requires_auth"]
+            await ws.send(json.dumps({
+                "command": "devices/logs",
+                "message_id": msg_id,
+                "args": {"configuration": configuration, "port": target_port, "no_states": True}
+            }))
+            start_time = asyncio.get_event_loop().time()
+            while True:
+                elapsed = asyncio.get_event_loop().time() - start_time
+                remaining = duration_seconds - elapsed
+                if remaining <= 0:
+                    break
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=max(0.1, remaining))
+                except asyncio.TimeoutError:
+                    break
+                data = json.loads(msg)
+                if data.get("message_id") == msg_id and data.get("event") == "output":
+                    line_data = data.get("data", "")
+                    if isinstance(line_data, dict):
+                        line = line_data.get("line", "").strip()
+                    else:
+                        line = str(line_data).strip()
+                    if line:
+                        output_lines.append(clean_ansi(line))
+    except Exception as e:
+        output_lines.append(f"LOG_ERROR: {str(e)}")
+    return output_lines
+
+
+@mcp.tool()
+async def flash_canary_ota(
+    configuration: str,
+    port: str = "OTA",
+    compile_first: bool = True,
+    monitor_seconds: int = 15,
+    auto_rollback: bool = True,
+    force_local: bool = False,
+    bootloader: bool = False,
+    host: str = DEFAULT_HOST,
+    api_port: int = DEFAULT_PORT
+) -> str:
+    """
+    Инструмент 29 (Phase 5.3.1): Безопасная Canary OTA-прошивка со сторожевым мониторингом запуска и авто-откатом при Bootloop.
+
+    Реализует защищенный конвейер обновления микроконтроллеров ESPHome:
+      1. Снятие контрольного снимка (Baseline Snapshot): сохранение исходного рабочего YAML через devices/get_config.
+      2. Компиляция и загрузка (Deploy): сборка прошивки (при compile_first=True) и OTA-загрузка на узел.
+         При ошибках компиляции или обрыве связи процесс безопасно останавливается без риска для контроллера.
+      3. Сторожевой мониторинг (Canary Watchdog): прослушивание runtime-логов первого запуска в течение monitor_seconds.
+      4. Детекция аварий ядра: выявление Guru Meditation Panic, Backtrace, Core Dump, WDT Bootloop и Safe Mode.
+      5. Автоматический откат (Safe Rollback): при обнаружении фатального сбоя и auto_rollback=True конфигурация
+         немедленно восстанавливается из контрольного снимка, повторно компилируется и прошивается обратно
+         (используя технологическое окно Safe Mode ESPHome OTA).
+
+    Параметры:
+      - configuration:   имя файла конфигурации ("test.yaml" или с префиксом "config/test.yaml")
+      - port:            целевой порт или сетевой IP/hostname устройства (по умолчанию "OTA")
+      - compile_first:   выполнять ли сборку перед прошивкой (по умолчанию True)
+      - monitor_seconds: время сторожевого мониторинга логов запуска в секундах (по умолчанию 15)
+      - auto_rollback:   выполнять ли автоматический откат при обнаружении паники ядра (по умолчанию True)
+      - force_local:     принудительная локальная сборка без кэша/кластера (по умолчанию False)
+      - bootloader:      прошивка bootloader (по умолчанию False)
+      - host:            хост сервера ESPHome (по умолчанию из .env или localhost)
+      - api_port:        сетевой порт WebSocket API ESPHome (по умолчанию из .env или 6052)
+    """
+    config_name = resolve_configuration(configuration)
+    logger.info(f"Запуск Canary OTA прошивки {config_name} (порт: {port}, мониторинг: {monitor_seconds}s, откат: {auto_rollback})...")
+
+    # Шаг 1. Фиксация Baseline (контрольного снимка)
+    baseline_ok, baseline_yaml = await _get_raw_device_config(host, api_port, config_name)
+    if not baseline_ok:
+        logger.warning(f"Не удалось получить baseline snapshot для {config_name}: {baseline_yaml}")
+
+    # Шаг 2. Компиляция (если запрошена)
+    if compile_first:
+        logger.info(f"Canary Deploy: компиляция прошивки {config_name}...")
+        compile_res = await compile_firmware(configuration=config_name, force_local=force_local, host=host, port=api_port)
+        if "ОШИБКА" in compile_res or "Критическая ошибка" in compile_res:
+            return (
+                f"### 🐥 Результаты безопасной Canary OTA-прошивки (flash_canary_ota)\n\n"
+                f"- **Целевая конфигурация:** `{config_name}`\n"
+                f"- **Итоговый вердикт:** 🔴 **СБОРКА НЕ УДАЛАСЬ (DECOMPILATION FAILED)**\n\n"
+                f"> ⛔ **Безопасная остановка:** Компиляция новой версии завершилась ошибкой. Загрузка прошивки отменена, "
+                f"устройство не подвергалось изменениям и продолжает работать в штатном режиме.\n\n"
+                f"**Лог компиляции:**\n{compile_res}"
+            )
+
+    # Шаг 3. Загрузка прошивки по OTA
+    logger.info(f"Canary Deploy: OTA-загрузка прошивки {config_name} на порт {port}...")
+    flash_res = await flash_ota(configuration=config_name, port=port, bootloader=bootloader, host=host, api_port=api_port)
+    if "ОШИБКА" in flash_res or "Критическая ошибка" in flash_res:
+        return (
+            f"### 🐥 Результаты безопасной Canary OTA-прошивки (flash_canary_ota)\n\n"
+            f"- **Целевая конфигурация:** `{config_name}` (порт: `{port}`)\n"
+            f"- **Итоговый вердикт:** 🔴 **ОШИБКА ЗАГРУЗКИ (UPLOAD FAILED)**\n\n"
+            f"> ℹ️ Прошивка не была передана на устройство (сетевой таймаут или отказ связи). "
+            f"Откат не требуется, устройство сохранило предыдущую рабочую версию.\n\n"
+            f"**Лог процесса загрузки:**\n{flash_res}"
+        )
+
+    # Шаг 4. Ожидание перезагрузки микроконтроллера и подъем Wi-Fi/Ethernet стека
+    logger.info(f"Canary Watchdog: пауза 4 секунды для перезагрузки узла {config_name}...")
+    await asyncio.sleep(4)
+
+    # Шаг 5. Сторожевой сбор и мониторинг логов первого запуска
+    logger.info(f"Canary Watchdog: сбор логов {config_name} на протяжении {monitor_seconds} сек...")
+    startup_logs = await _collect_device_logs(host, api_port, config_name, port, duration_seconds=monitor_seconds)
+
+    # Шаг 6. Интеллектуальный анализ здоровья запуска
+    health = analyze_canary_health(startup_logs)
+
+    # Ветка 1: Обнаружен критический сбой (Guru Meditation / Bootloop / Safe Mode)
+    if not health["is_healthy"]:
+        logger.error(f"Canary Watchdog: ОБНАРУЖЕН КРАШ УЗЛА {config_name}! Маркеры: {health['crash_markers']}")
+        report = [
+            f"### 🐥 Результаты безопасной Canary OTA-прошивки (flash_canary_ota)\n",
+            f"- **Целевая конфигурация:** `{config_name}` (порт: `{port}`)",
+            f"- **Итоговый вердикт:** 🔴 **CANARY FAILED (ОБНАРУЖЕНА КРИТИЧЕСКАЯ АВАРИЯ / BOOTLOOP)**\n",
+            f"#### ❌ Обнаруженные маркеры сбоев ядра:"
+        ]
+        for marker in health["crash_markers"]:
+            report.append(f"- 💥 {marker}")
+
+        # Расшифровка стектрейса при наличии
+        if health["backtrace_lines"]:
+            try:
+                decoded_bt = await decode_crash_backtrace(configuration=config_name, lines=health["backtrace_lines"][:10], host=host, port=api_port)
+                report.append(f"\n#### 🔍 Расшифровка стека вызовов паники (Backtrace):\n{decoded_bt}\n")
+            except Exception as e:
+                report.append(f"\n*Не удалось автоматически расшифровать Backtrace: {e}*\n")
+
+        # Процедура автоматического отката (Auto-Rollback)
+        if auto_rollback and baseline_ok and baseline_yaml:
+            report.append("---\n### 🛡️ Автоматический откат конфигурации и прошивки (Auto-Rollback):\n")
+            logger.info(f"Canary Rollback: восстановление исходной конфигурации {config_name}...")
+            rb_upd_ok, rb_upd_msg = await _update_raw_device_config(host, api_port, config_name, baseline_yaml)
+            if rb_upd_ok:
+                report.append("- **Восстановление YAML:** 🟢 Исходный рабочий конфигурационный файл успешно восстановлен из снимка")
+                # Компиляция стабильной версии
+                logger.info(f"Canary Rollback: компиляция стабильной версии {config_name}...")
+                rb_comp = await compile_firmware(configuration=config_name, force_local=force_local, host=host, port=api_port)
+                if "УСПЕШНО" in rb_comp:
+                    report.append("- **Сборка стабильной прошивки:** 🟢 УСПЕШНО скомпилирована")
+                    # Экстренная OTA-прошивка в Safe Mode
+                    logger.info(f"Canary Rollback: экстренная OTA-прошивка узла {config_name}...")
+                    rb_flash = await flash_ota(configuration=config_name, port=port, bootloader=bootloader, host=host, api_port=api_port)
+                    if "УСПЕШНО" in rb_flash:
+                        report.append("- **Экстренная OTA-прошивка:** 🟢 УСПЕШНО загружена на узел")
+                        report.append("\n> 🟢 **Устройство спасено:** Контроллер возвращен на стабильную прошивку. Риск потери связи полностью устранен!")
+                    else:
+                        report.append(f"- **Экстренная OTA-прошивка:** 🔴 Ошибка загрузки: {rb_flash}")
+                else:
+                    report.append(f"- **Сборка стабильной прошивки:** 🔴 Ошибка компиляции: {rb_comp}")
+            else:
+                report.append(f"- **Восстановление YAML:** 🔴 Не удалось восстановить файл: {rb_upd_msg}")
+        elif not auto_rollback:
+            report.append("\n> ⚠️ Авто-откат был отключен (`auto_rollback=False`). Контроллер остался в текущем состоянии (возможно в ESPHome Safe Mode).")
+        else:
+            report.append("\n> ⚠️ Авто-откат не выполнен, так как baseline snapshot конфигурации отсутствовал.")
+
+        return "\n".join(report)
+
+    # Ветка 2: Успешный запуск узла (Canary Passed)
+    log_tail_lines = startup_logs[-15:] if startup_logs else ["(логов не зафиксировано за время мониторинга)"]
+    log_tail_str = "\n".join(log_tail_lines)
+
+    return (
+        f"### 🐥 Результаты безопасной Canary OTA-прошивки (flash_canary_ota)\n\n"
+        f"- **Целевая конфигурация:** `{config_name}` (порт: `{port}`)\n"
+        f"- **Статус сборки и загрузки:** 🟢 УСПЕШНО\n"
+        f"- **Время сторожевого мониторинга:** {monitor_seconds} сек.\n"
+        f"- **Итоговый вердикт Canary Watchdog:** 🟢 **CANARY PASSED (Устройство работает стабильно)**\n\n"
+        f"#### 📋 Метрики здоровья запуска:\n"
+        f"- Собрано строк телеметрии: {health['total_lines']}\n"
+        f"- Аппаратных паник / Guru Meditation: 0\n"
+        f"- Аварийных рестартов (WDT/Panic): 0\n"
+        f"- Safe Mode: Не активирован\n\n"
+        f"#### 📜 Лог первого запуска устройства (tail 15 строк):\n"
+        f"```text\n{log_tail_str}\n```"
+    )
+
+
 @mcp.tool()
 async def get_server_version() -> str:
     """
-    Инструмент 16: Получение информации о версии MCP-сервера и протоколе.
+    Инструмент 28: Получение информации о версии MCP-сервера, протоколе, ресурсах и промптах.
 
-    Возвращает текущую версию сервера (SemVer), статус компонентов и базовую конфигурацию.
+    Возвращает текущую версию сервера (SemVer), статус компонентов, ресурсы и интерактивные промпты.
     """
     return (
         f"### ESPHome Local MCP Server\n"
@@ -3459,7 +5155,9 @@ async def get_server_version() -> str:
         f"- **Стандарт версионирования:** Semantic Versioning 2.0.0 (SemVer)\n"
         f"- **Хост по умолчанию:** `{DEFAULT_HOST}:{DEFAULT_PORT}`\n"
         f"- **Транспорт:** stdio\n"
-        f"- **Количество инструментов:** 16"
+        f"- **Инструментов (Tools):** 29\n"
+        f"- **Контекстные ресурсы (Resources):** `esphome://devices`, `esphome://configs/{{configuration}}`, `esphome://components/{{component_id}}`, `esphome://boards/{{board_id}}`\n"
+        f"- **Интерактивные промпты (Prompts):** `new_device_wizard`, `troubleshoot_offline_device`, `safe_firmware_upgrade`"
     )
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@
 ## 🎯 Роль и зона ответственности агента
 
 Вы выступаете в роли **эксперта по разработке встроенного ПО и систем автоматизации умного дома на базе ESPHome**.
-Все операции с устройствами, файлами конфигураций, сборками и диагностикой вы выполняете через **27 специализированных инструментов ESPHome Local MCP Server**, взаимодействующих с ESPHome Device Builder API.
+Все операции с устройствами, файлами конфигураций, сборками и диагностикой вы выполняете через **29 специализированных инструментов, 4 контекстных ресурса и 3 интерактивных промпта ESPHome Local MCP Server**, взаимодействующих с ESPHome Device Builder API.
 
 ---
 
@@ -66,28 +66,56 @@
    ```python
    validate_yaml(configuration="climate-sensor.yaml")
    ```
+5. **Аппаратный аудит распиновки GPIO:**
+   ```python
+   # Проверка конфликтов Flash/Strapping/Input-only пинов и шин I2C
+   validate_hardware_pinout(configuration="climate-sensor.yaml")
+   ```
 
 ---
 
 ### 🧩 Сценарий 2: Редактирование YAML и добавление компонентов
 
-1. **Чтение текущего YAML:**
+1. **Чтение текущего YAML или получение ключа шифрования:**
    ```python
+   # Получение полного текста конфигурации
    manage_device_config(action="get", configuration="climate-sensor.yaml")
+   # Получение ключа Native API / OTA шифрования
+   manage_device_config(action="key", configuration="climate-sensor.yaml")
    ```
 2. **Проверка совместимости режимов пинов (при использовании расширителей GPIO):**
    ```python
    search_components(action="pin_modes")
    ```
-3. **Обновление содержимого YAML:**
+3. **Безопасная вставка компонента через AST (Dry-Run ➔ Apply):**
+   ```python
+   # Шаг А: Предпросмотр слияния YAML без сохранения на диск
+   manage_device_config(
+       action="add_component",
+       configuration="climate-sensor.yaml",
+       component_id="sensor.bme280_i2c",
+       fields={"temperature": {"name": "Комнатная температура"}},
+       apply=False
+   )
+   # Шаг Б: Атомарное сохранение на диске
+   manage_device_config(
+       action="add_component",
+       configuration="climate-sensor.yaml",
+       component_id="sensor.bme280_i2c",
+       fields={"temperature": {"name": "Комнатная температура"}},
+       apply=True
+   )
+   ```
+4. **Обновление содержимого YAML с защитой от перезаписи (CAS):**
    ```python
    manage_device_config(
        action="update",
        configuration="climate-sensor.yaml",
-       content="<новый полный текст YAML>"
+       content="<новый полный текст YAML>",
+       expected="<предыдущий текст для проверки отсутствия параллельных изменений>"
    )
    ```
-4. **Проверка корректности:**
+5. **Проверка корректности:**
    ```python
    validate_yaml(configuration="climate-sensor.yaml")
    ```
@@ -103,11 +131,16 @@
    # Получение доступных ID компонентов и скриптов
    manage_automations(action="available", configuration="livingroom-light.yaml")
    ```
-2. **Справка по доступным триггерам, действиям и условиям:**
+2. **Справка по доступным триггерам, действиям, условиям, эффектам и фильтрам:**
    ```python
    manage_automations(action="triggers", query="button")
    manage_automations(action="actions", query="light")
    manage_automations(action="conditions")
+   # Каталоги световых эффектов и фильтров сенсоров
+   manage_automations(action="light_effects", query="rainbow")
+   manage_automations(action="filters")
+   # Получение детальных схем и паспортов сущностей
+   manage_automations(action="docs", query="light.turn_on")
    ```
 3. **Точечная вставка автоматизации (Dry-Run ➔ Apply):**
    ```python
@@ -148,6 +181,14 @@
    compile_firmware(configuration="node-01.yaml")
    # 3. OTA-прошивка (по умолчанию порт "OTA")
    flash_ota(configuration="node-01.yaml", port="OTA")
+   # 4. Либо защищенная Canary OTA-прошивка со сторожевым мониторингом и авто-откатом при Bootloop:
+   flash_canary_ota(
+       configuration="node-01.yaml",
+       port="OTA",
+       compile_first=True,
+       monitor_seconds=15,
+       auto_rollback=True
+   )
    ```
 2. **Пакетная прошивка группы устройств (с поддержкой отложенного обновления для оффлайн-узлов):**
    ```python
@@ -157,12 +198,14 @@
        port="OTA"
    )
    ```
-3. **Управление очередью сборки и кэшем:**
+3. **Управление очередью сборки, кэшем и профилирование памяти:**
    ```python
    # Список активных задач
    manage_build_jobs(action="get_jobs")
    # Очистка build-кэша при ошибках линковки
    manage_build_jobs(action="clean", configuration="node-01.yaml")
+   # Профилирование расхода Flash и RAM по библиотекам и компонентам
+   manage_build_jobs(action="analyze_memory", configuration="node-01.yaml")
    ```
 
 ---
@@ -176,9 +219,9 @@
    # Общая сводка онлайн/офлайн устройств
    troubleshoot_device(action="states")
    ```
-2. **Чтение потоковых логов:**
+2. **Чтение потоковых логов (с фильтрацией фонового шума состояний):**
    ```python
-   stream_device_logs(configuration="node-01.yaml", duration_seconds=15, lines_count=50)
+   stream_device_logs(configuration="node-01.yaml", duration_seconds=15, lines_count=50, no_states=True)
    ```
 3. **Расшифровка C++ стектрейса паники (Kernel Panic / Guru Meditation):**
    ```python
@@ -240,7 +283,7 @@
 
 ---
 
-## 🗂 Сводный справочник всех 27 MCP Инструментов
+## 🗂 Сводный справочник всех 29 MCP Инструментов
 
 | Инструмент | Категория | Ключевые аргументы | Назначение |
 |---|---|---|---|
@@ -248,26 +291,54 @@
 | `compile_firmware` | Compile/Flash | `configuration, force_local` | Компиляция прошивки в ELF/BIN |
 | `flash_ota` | Compile/Flash | `configuration, port, bootloader` | Прошивка готового бинарника (OTA/IP/Serial) |
 | `compile_and_flash` | Compile/Flash | `configuration, port, force_local, bootloader` | Полный цикл сборки и прошивки |
+| `flash_canary_ota` | Canary Deploy | `configuration, port, monitor_seconds, auto_rollback` | Безопасная Canary OTA-прошивка с baseline-снимком, сторожевым мониторингом и авто-откатом при Bootloop |
 | `list_devices` | Monitoring | `host, port` | Список устройств, IP, статусы онлайн и dirty-флаги |
-| `stream_device_logs` | Monitoring | `configuration, port, duration_seconds, lines_count` | Потоковые runtime-логи (OTA/Serial) |
+| `stream_device_logs` | Monitoring | `configuration, port, duration_seconds, lines_count, no_states` | Потоковые runtime-логи (OTA/Serial) с опцией фильтрации шума состояний |
 | `decode_crash_backtrace`| Debug | `configuration, lines` | Расшифровка C++ дампов паники и стектрейсов |
 | `search_yaml_configs` | Search | `query, context_lines, case_sensitive` | Полнотекстовый поиск подстроки по всем YAML |
 | `troubleshoot_device` | Network | `configuration, action` (`probe`, `states`) | Глубокая диагностика DNS/mDNS/ICMP RTT |
-| `manage_device_config` | YAML CRUD | `action, configuration, content, new_name, board_id...` | CRUD конфигураций, генерация по плате, переименование |
+| `validate_hardware_pinout` | Hardware Audit | `configuration, content` | Статический и аппаратный аудит GPIO: детекция конфликтов Flash/Strapping/Input-only пинов, шины I2C |
+| `manage_device_config` | YAML CRUD | `action, configuration, content, new_name, board_id, fields, expected...` | CRUD конфигураций, генерация по плате, ключ (`key`), вставка компонентов (`add_component`), CAS, метаданные (`metadata`), импорт (`import`), сокрытие (`ignore`) |
 | `migrate_device_config` | Migration | `configuration, content, apply` | Автомиграция устаревшего YAML синтаксиса |
-| `manage_automations` | AST Automations| `action, configuration, component_id, trigger, automation, apply` | Парсинг и точечная мутация автоматизаций |
+| `manage_automations` | AST Automations| `action, configuration, component_id, trigger, automation, expected, apply` | Парсинг и мутация автоматизаций, каталоги эффектов/фильтров, паспорта схем |
 | `search_components` | Catalog | `action, query, category, platform, component_id...` | База >940 компонентов, зависимости шин, режимы пинов |
-| `manage_secrets` | Secrets | `action, key, value, ssid, psk` | Безопасное управление `secrets.yaml` и Wi-Fi |
+| `manage_secrets` | Secrets | `action, key, value, ssid, psk, overwrite` | Безопасное управление `secrets.yaml` и Wi-Fi с защитой перезаписи |
 | `manage_labels` | Labels | `action, label_id, name, color` | CRUD каталога меток (тегов) парка |
 | `batch_manage_devices` | Batch | `action, configurations, label_ids, updates` | Пакетная архивация, удаление и установка меток |
-| `get_host_info` | Host Info | `action` (`version`, `serial_ports`) | Версии ядра ESPHome и список USB-Serial портов |
+| `get_host_info` | Host Info | `action, preferences` | Версии ядра ESPHome, USB-Serial порты, чтение и запись настроек дашборда (`preferences`) |
 | `get_board_info` | Boards | `action, board_id, platform, variant, mcu, tag...` | База данных плат, MCU, чипов, распиновка |
-| `manage_build_jobs` | Build Queue | `action, configuration, job_id, status_filter` | Очередь сборки, отмена, сброс кэша (`clean`) |
+| `manage_build_jobs` | Build Queue | `action, configuration, job_id, status_filter` | Очередь сборки, отмена, сброс кэша (`clean`), профилирование памяти (`analyze_memory`) |
 | `batch_compile_and_flash`| Batch Build | `configurations, action, port, force_local, bootloader` | Пакетная компиляция и прошивка группы устройств |
 | `get_firmware_binaries` | Artifacts | `configuration, action, file, save_path` | Инспекция артефактов, выпуск токенов и HTTP-скачивание |
 | `archive_devices` | Archive | `action, configuration` | Мягкая архивация, просмотр и восстановление |
 | `manage_device_labels` | Device Labels | `configuration, label_ids` | Установка/снятие меток конкретного устройства |
 | `manage_version_history`| Git Versioning | `action, configuration, sha, sha_compare, max_count...` | Git история коммитов, diff, show, restore |
-| `manage_remote_build` | Cluster Build | `action, enabled, cleanup_ttl_seconds, hostname, target_port...`| Мониторинг кластера компиляции, TTL, Noise XX сопряжение |
-| `authenticate_esphome` | Security | `username, password, token` | Авторизация на защищенных ESPHome-серверах |
-| `get_server_version` | Server | — | SemVer версия MCP-сервера и протокола |
+| `manage_remote_build` | Cluster Build | `action, enabled, cleanup_ttl_seconds, hostname, target_port...`| Мониторинг кластера компиляции, Noise XX сопряжение, окно сопряжения (`set_pairing_window`), ротация identity (`rotate_identity`), диспетчер (`set_offloader_settings`) |
+| `authenticate_esphome` | Security | `action, username, password, token` | Вход (`login`), отзыв токенов сессии (`logout`) и продление доступа (`refresh`) |
+| `get_server_version` | Server | — | SemVer версия MCP-сервера, протокол, ресурсы и промпты |
+
+---
+
+## 📦 Справочник контекстных ресурсов MCP (MCP Resources)
+
+Агенты могут запрашивать контекст напрямую через ссылки на ресурсы (URI) без вызова инструментов:
+
+| Ресурс (URI) | Формат | Описание |
+|---|:---:|---|
+| `esphome://devices` | JSON | Живой реестр устройств со статусами онлайн/офлайн, адресами и версиями. Используйте для быстрого обзора парка. |
+| `esphome://configs/{configuration}` | YAML | Чистый YAML файл устройства. Удобно для чтения текущей конфигурации без лишнего форматирования. |
+| `esphome://components/{component_id}` | JSON | Полная схема параметров компонента `config_entries`, типы полей, требования к шинам. |
+| `esphome://boards/{board_id}` | JSON | Аппаратная распиновка платы, доступные GPIO, strapping/flash ограничения. |
+
+---
+
+## 💬 Справочник стандартизированных промптов MCP (MCP Prompts)
+
+Интерактивные шаблоны для типовых инженерных регламентов:
+
+| Промпт (Prompt) | Аргументы | Назначение |
+|---|---|---|
+| `new_device_wizard` | `board_id, device_name, friendly_name, components` | Пошаговый мастер проектирования нового устройства (выбор платы, проверка шин, датчики, валидация и компиляция). |
+| `troubleshoot_offline_device` | `configuration` | Автономный чеклист диагностики оффлайн-узла: зонд L3/L4/mDNS, аудит недавних правок Git, дампы паники и откат. |
+| `safe_firmware_upgrade` | `configuration, target_port` | Регламент безопасного обновления прошивки: контрольная точка, валидация, профилирование памяти, OTA и пост-мониторинг. |
+

@@ -1,6 +1,6 @@
 # ESPHome Local MCP Server
 
-[![Version](https://img.shields.io/badge/version-1.12.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.15.0-blue.svg)](CHANGELOG.md)
 [![SemVer 2.0.0](https://img.shields.io/badge/SemVer-2.0.0-green.svg)](https://semver.org/)
 [![Documentation](https://img.shields.io/badge/docs-API.md-orange.svg)](https://github.com/esphome/device-builder/blob/main/docs/API.md)
 
@@ -23,7 +23,7 @@
 
 - **Интеграция через WebSockets:** Напрямую общается с локальным ESPHome Device Builder API (по умолчанию `ws://localhost:6052/ws`).
 - **Гибкая конфигурация (.env):** Поддерживает чтение IP-адреса (`host`) и порта (`port`) сервера API из файла `.env` в формате TOML с автоматическим возвратом к `localhost:6052` при отсутствии файла или ошибках парсинга.
-- **Умная обработка логов:** Очищает вывод ESPHome от ANSI-цветовых кодов для обеспечения чистого и читаемого ответа для LLM.
+- **Умная обработка логов:** Очищает вывод ESPHome от ANSI-цветовых кодов для обеспечения чистого и читаемого ответа для LLM, поддерживает подавление фонового шума сенсоров (`no_states`).
 - **Двухшаговый трекинг задач:** Корректно подписывается на задачи компиляции и прошивки (`firmware/follow_job`) и дожидается их завершения (событие `result`).
 - **Работа исключительно через API:** Вся информация о конфигурациях передается строго через WebSocket API ESPHome Device Builder без доступа к локальным файлам хоста.
 - **Нормализация путей:** Поддерживает два формата параметра `configuration`:
@@ -35,11 +35,11 @@
 
 ## 🛠 Доступные MCP Инструменты
 
-Сервер предоставляет **27 инструментов** для AI-агентов, разбитых на 4 группы. Каждая команда поддерживает опциональное переопределение `host` и `port` (`api_port`).
+Сервер предоставляет **29 инструментов** для AI-агентов, разбитых на 4 группы. Каждая команда поддерживает опциональное переопределение `host` и `port` (`api_port`).
 
 ---
 
-### Группа 1: Базовые операции (Compile & Flash)
+### Группа 1: Базовые и Защищенные операции (Compile, Flash & Canary Rollback)
 
 | # | Инструмент | API-команда | Описание |
 |---|-----------|-------------|----------|
@@ -47,18 +47,20 @@
 | 2 | `compile_firmware(configuration, force_local, host, port)` | `firmware/compile` | Полная компиляция прошивки без загрузки; поддерживает принудительную локальную сборку (`force_local`) |
 | 3 | `flash_ota(configuration, port, bootloader, host, api_port)` | `firmware/upload` | Прошивка готового бинарника (по умолчанию `"OTA"`, явный IP или Serial); поддержка записи bootloader |
 | 4 | `compile_and_flash(configuration, port, force_local, bootloader, host, api_port)` | `firmware/install` | Полный цикл сборки и прошивки (OTA / IP / Serial); поддержка `force_local` и `bootloader` |
+| 5 | `flash_canary_ota(configuration, port, compile_first, monitor_seconds, auto_rollback, force_local, bootloader, host, api_port)` | `devices/get_config`, `firmware/*`, `devices/logs`, `devices/decode_backtrace` | Защищенная Canary OTA-прошивка: сохранение baseline-снимка, сборка, прошивка, сторожевой мониторинг запуска (Canary Watchdog), выявление Guru Meditation/Bootloop/Safe Mode и экстренный авто-откат (Auto-Rollback) |
 
 ---
 
-### Группа 2: Мониторинг, Отладка и Сетевая Диагностика (P0/P2)
+### Группа 2: Мониторинг, Отладка, Сетевая Диагностика и Аппаратный Аудит (P0/P2/Phase 5)
 
 | # | Инструмент | API-команда | Описание |
 |---|-----------|-------------|----------|
-| 5 | `list_devices(host, port)` | `devices/list` | Список всех устройств с IP-адресами, статусами (online/offline), версиями прошивки и флагами незакомпилированных изменений |
-| 6 | `stream_device_logs(configuration, port, duration_seconds, lines_count, host, api_port)` | `devices/logs` | Чтение runtime-логов работы устройства по OTA или Serial в реальном времени |
-| 7 | `decode_crash_backtrace(configuration, lines, host, port)` | `devices/decode_backtrace` | Расшифровка C++ стектрейсов/дампов паники устройства с помощью `addr2line` и ELF-символов сборки |
-| 8 | `search_yaml_configs(query, context_lines, case_sensitive, host, port)` | `yaml/search` | Полнотекстовый поиск подстроки по всем YAML-конфигурациям ESPHome с выводом контекстных строк |
-| 9 | `troubleshoot_device(configuration, action, host, port)` | `devices/troubleshoot`, `devices/get_states` | Глубокая сетевая диагностика доступности узла (DNS resolve, mDNS/Zeroconf анонсы, ICMP Ping с замером RTT в мс) и получение матрицы онлайн/офлайн состояний |
+| 6 | `list_devices(host, port)` | `devices/list` | Список всех устройств с IP-адресами, статусами (online/offline), версиями прошивки и флагами незакомпилированных изменений |
+| 7 | `stream_device_logs(configuration, port, duration_seconds, lines_count, no_states, host, api_port)` | `devices/logs` | Чтение runtime-логов работы устройства по OTA или Serial в реальном времени с опцией фильтрации шума состояний (`no_states`) |
+| 8 | `decode_crash_backtrace(configuration, lines, host, port)` | `devices/decode_backtrace` | Расшифровка C++ стектрейсов/дампов паники устройства с помощью `addr2line` и ELF-символов сборки |
+| 9 | `search_yaml_configs(query, context_lines, case_sensitive, host, port)` | `yaml/search` | Полнотекстовый поиск подстроки по всем YAML-конфигурациям ESPHome с выводом контекстных строк |
+| 10 | `troubleshoot_device(configuration, action, host, port)` | `devices/troubleshoot`, `devices/get_states` | Глубокая сетевая диагностика доступности узла (DNS resolve, mDNS/Zeroconf анонсы, ICMP Ping с замером RTT в мс) и получение матрицы онлайн/офлайн состояний |
+| 11 | `validate_hardware_pinout(configuration, content, host, port)` | `devices/get_config`, `boards/get_board` | Интеллектуальный статический и аппаратный аудит GPIO: детекция конфликтов SPI Flash, входных пинов (Input-only), повторного использования пинов, коллизий адресов I2C, предупреждения Strapping/ADC2 пинов |
 
 ---
 
@@ -66,16 +68,16 @@
 
 | # | Инструмент | API-команды | Описание |
 |---|-----------|-------------|----------|
-| 10 | `manage_device_config(action, configuration, content, new_name, board_id, friendly_name, ssid, psk, config_only, overwrite, allow_wipe, host, port)` | `devices/get_config`, `devices/update_config`, `devices/create`, `devices/rename`, `devices/delete` | Управление YAML: CRUD, создание по шаблону платы (`board_id`), интеграция с `secrets.yaml` (Wi-Fi), офлайн (`config_only=True`) и онлайн (`config_only=False`) переименование |
-| 11 | `migrate_device_config(configuration, content, apply, host, port)` | `editor/migrate_config`, `devices/get_config`, `devices/update_config` | Автоматическая миграция устаревшего YAML синтаксиса ESPHome (services ➔ actions, clk_mode ➔ clk и др.), получение patch diff и сохранение |
-| 12 | `manage_automations(action, configuration, component_id, trigger, kind, automation, apply, query, host, port)` | `automations/parse`, `automations/get_available`, `automations/get_triggers`, `automations/get_actions`, `automations/get_conditions`, `automations/upsert`, `automations/delete` | Управление AST автоматизаций ESPHome: парсинг логики (`parse`), доступные сущности (`available`), каталоги триггеров/действий/условий, точечное добавление (`upsert`) и удаление (`delete`) блоков с поддержкой dry-run и apply |
-| 13 | `search_components(action, query, category, platform, component_id, limit, offset, host, port)` | `components/get_components`, `components/get_categories`, `components/get_pin_registry_modes` | Каталог компонентов ESPHome (>940 записей): поиск, зависимости (I2C/SPI/UART), ограничения шин, паспорт компонента, категории и режимы пинов |
-| 14 | `manage_secrets(action, key, value, ssid, psk, host, port)` | `config/get_secrets`, `config/set_secret`, `config/set_wifi_credentials` | Безопасное управление секретами (`secrets.yaml`): просмотр доступных ключей (без раскрытия приватных значений), атомарная запись секретов и настройка Wi-Fi |
-| 15 | `manage_labels(action, label_id, name, color, host, port)` | `labels/list`, `labels/create`, `labels/update`, `labels/delete` | Управление глобальным каталогом меток (тегов): создание меток с HEX-цветом (`#rrggbb`), редактирование, просмотр каталога и каскадное удаление |
-| 16 | `batch_manage_devices(action, configurations, label_ids, updates, host, port)` | `devices/archive_bulk`, `devices/delete_bulk`, `devices/set_labels_bulk` | Пакетные операции над устройствами: массовая архивация, массовое безвозвратное удаление и массовое назначение меток на группу устройств |
-| 17 | `get_host_info(action, host, port)` | `config/version`, `config/serial_ports` | Информация о хосте ESPHome: версии бэкенда/ESPHome Core и список обнаруженных физических USB-Serial адаптеров |
-| 18 | `get_board_info(action, board_id, platform, variant, mcu, tag, query, limit, offset, host, port)` | `boards/get_boards`, `boards/get_board`, `boards/get_compatible_boards` | Каталог плат ESPHome: поиск по платформе, чипу (`variant`), MCU, тегам, пагинация (`offset`), полная распиновка и совместимость |
-| 19 | `manage_build_jobs(action, configuration, job_id, status_filter, host, port)` | `firmware/get_jobs`, `firmware/get_job`, `firmware/cancel`, `firmware/clean`, `firmware/reset_build_env`, `firmware/clear`, `firmware/clear_queued_update` | Управление сборками: мониторинг задач, отмена, очистка кэша, сброс окружения, очистка истории задач (`clear`), сброс отложенных обновлений (`clear_queued`) |
+| 12 | `manage_device_config(action, configuration, content, new_name, board_id, friendly_name, comment, ssid, psk, config_only, overwrite, allow_wipe, fields, sub_entities, expected, apply, project_name, ignore_device, host, port)` | `devices/get_config`, `devices/update_config`, `devices/create`, `devices/rename`, `devices/delete`, `devices/get_encryption_key`, `devices/add_component`, `devices/update`, `devices/import`, `devices/ignore` | Управление YAML и реестром: CRUD, создание по шаблону платы, ключ шифрования (`action="key"`), вставка компонентов (`action="add_component"` dry-run/apply), CAS-защита (`expected`), обновление метаданных sidecar JSON (`action="metadata"`), импорт (`action="import"`), сокрытие (`action="ignore"`), переименование |
+| 13 | `migrate_device_config(configuration, content, apply, host, port)` | `editor/migrate_config`, `devices/get_config`, `devices/update_config` | Автоматическая миграция устаревшего YAML синтаксиса ESPHome (services ➔ actions, clk_mode ➔ clk и др.), получение patch diff и сохранение |
+| 14 | `manage_automations(action, configuration, component_id, trigger, kind, automation, expected, apply, query, host, port)` | `automations/parse`, `automations/get_available`, `automations/get_triggers`, `automations/get_actions`, `automations/get_conditions`, `automations/get_light_effects`, `automations/get_filters`, `automations/get_bodies`, `automations/upsert`, `automations/delete` | Управление AST автоматизаций ESPHome: парсинг логики, реестр компонентов, каталоги триггеров/действий/условий/световых эффектов/фильтров, паспорта (`bodies`), точечный upsert/delete блоков с оптимистичной блокировкой (`expected`) |
+| 15 | `search_components(action, query, category, platform, component_id, limit, offset, host, port)` | `components/get_components`, `components/get_categories`, `components/get_pin_registry_modes` | Каталог компонентов ESPHome (>940 записей): поиск, зависимости (I2C/SPI/UART), ограничения шин, паспорт компонента, категории и режимы пинов |
+| 16 | `manage_secrets(action, key, value, ssid, psk, overwrite, host, port)` | `config/get_secrets`, `config/set_secret`, `config/set_wifi_credentials` | Безопасное управление секретами (`secrets.yaml`): просмотр доступных ключей, атомарная запись секретов (с защитой `overwrite=False`), настройка Wi-Fi |
+| 17 | `manage_labels(action, label_id, name, color, host, port)` | `labels/list`, `labels/create`, `labels/update`, `labels/delete` | Управление глобальным каталогом меток (тегов): создание меток с HEX-цветом (`#rrggbb`), редактирование, просмотр каталога и каскадное удаление |
+| 18 | `batch_manage_devices(action, configurations, label_ids, updates, host, port)` | `devices/archive_bulk`, `devices/delete_bulk`, `devices/set_labels_bulk` | Пакетные операции над устройствами: массовая архивация, массовое безвозвратное удаление и массовое назначение меток на группу устройств |
+| 19 | `get_host_info(action, preferences, host, port)` | `config/version`, `config/serial_ports`, `config/get_preferences`, `config/set_preferences` | Информация о хосте ESPHome: версии бэкенда/ESPHome Core, USB-Serial порты, чтение и запись настроек дашборда (`action="preferences"`, `action="set_preferences"`) |
+| 20 | `get_board_info(action, board_id, platform, variant, mcu, tag, query, limit, offset, host, port)` | `boards/get_boards`, `boards/get_board`, `boards/get_compatible_boards` | Каталог плат ESPHome: поиск по платформе, чипу (`variant`), MCU, тегам, пагинация (`offset`), полная распиновка и совместимость |
+| 21 | `manage_build_jobs(action, configuration, job_id, status_filter, host, port)` | `firmware/get_jobs`, `firmware/get_job`, `firmware/cancel`, `firmware/clean`, `firmware/reset_build_env`, `firmware/clear`, `firmware/clear_queued_update`, `firmware/analyze_memory` | Управление сборками: мониторинг задач, отмена, очистка кэша, сброс окружения, очистка истории задач (`clear`), сброс отложенных обновлений (`clear_queued`), компиляция и детальное профилирование памяти (`analyze_memory`) |
 
 ---
 
@@ -83,14 +85,39 @@
 
 | # | Инструмент | API-команды | Описание |
 |---|-----------|-------------|----------|
-| 20 | `batch_compile_and_flash(configurations, action, port, force_local, bootloader, host, api_port)` | `firmware/compile_bulk`, `firmware/install_bulk` | Пакетная компиляция и/или OTA/Serial-прошивка группы устройств; поддерживает отложенные обновления (deferred install) для оффлайн-устройств, флаги `force_local` и `bootloader` |
-| 21 | `get_firmware_binaries(configuration, action, file, save_path, host, port)` | `firmware/get_binaries`, `firmware/download_token` | Инспекция артефактов прошивки (`list`), генерация одноразовых токенов скачивания (`token`) и прямое скачивание бинарников на диск хоста (`download`) через HTTP |
-| 22 | `archive_devices(action, configuration, host, port)` | `devices/archive`, `devices/unarchive`, `devices/list_archived`, `devices/delete_archived` | Мягкое удаление устройств в архив (обратимо), восстановление и просмотр архива |
-| 23 | `manage_device_labels(configuration, label_ids, host, port)` | `devices/set_labels` | Установка/удаление меток (тегов) одного конкретного устройства |
-| 24 | `manage_version_history(action, configuration, sha, sha_compare, max_count, config_dir, host, port)` | Git CLI / `devices/*` | История изменений конфигураций (Git Version History): просмотр коммитов (`log`), изменений (`diff`), содержимого ревизии (`show`), удаленных файлов (`deleted`) и безопасный откат (`restore`) через API |
-| 25 | `manage_remote_build(action, enabled, cleanup_ttl_seconds, hostname, target_port, pairing_key, peer_id, host, port)` | `remote_build/get_settings`, `remote_build/set_settings`, `remote_build/preview_pair`, `remote_build/request_pair`, `remote_build/unpair`, `remote_build/approve_peer`, `remote_build/remove_peer` | Управление распределенной кластерной компиляцией (Remote Build / Offloading): мониторинг, настройка параметров, безопасное сопряжение (Noise XX handshake / fingerprint) и управление пирами |
-| 26 | `authenticate_esphome(username, password, token, host, port)` | `auth/login` | Аутентификация на ESPHome-серверах, защищённых паролем (`requires_auth=true`) |
-| 27 | `get_server_version()` | internal / SSOT | Получение информации о версии MCP-сервера (SemVer), протоколе и среде |
+| 22 | `batch_compile_and_flash(configurations, action, port, force_local, bootloader, host, api_port)` | `firmware/compile_bulk`, `firmware/install_bulk` | Пакетная компиляция и/или OTA/Serial-прошивка группы устройств; поддерживает отложенные обновления (deferred install) для оффлайн-устройств, флаги `force_local` и `bootloader` |
+| 23 | `get_firmware_binaries(configuration, action, file, save_path, host, port)` | `firmware/get_binaries`, `firmware/download_token` | Инспекция артефактов прошивки (`list`), генерация одноразовых токенов скачивания (`token`) и прямое скачивание бинарников на диск хоста (`download`) через HTTP |
+| 24 | `archive_devices(action, configuration, host, port)` | `devices/archive`, `devices/unarchive`, `devices/list_archived`, `devices/delete_archived` | Мягкое удаление устройств в архив (обратимо), восстановление и просмотр архива |
+| 25 | `manage_device_labels(configuration, label_ids, host, port)` | `devices/set_labels` | Установка/удаление меток (тегов) одного конкретного устройства |
+| 26 | `manage_version_history(action, configuration, sha, sha_compare, max_count, config_dir, host, port)` | Git CLI / `devices/*` | История изменений конфигураций (Git Version History): просмотр коммитов (`log`), изменений (`diff`), содержимого ревизии (`show`), удаленных файлов (`deleted`) и безопасный откат (`restore`) через API |
+| 27 | `manage_remote_build(action, enabled, cleanup_ttl_seconds, hostname, target_port, pairing_key, peer_id, dashboard_id, pin_sha256, receiver_label, offloader_label, open_window, version_match_policy, include_local_in_pool, remote_builds_enabled, host, port)` | `remote_build/*` | Управление распределенной кластерной компиляцией: настройки, Noise XX сопряжение, окно сопряжения (`set_pairing_window`), ротация identity (`rotate_identity`), политики планировщика (`set_offloader_settings`) и управление пирами |
+| 28 | `authenticate_esphome(action, username, password, token, host, port)` | `auth/login`, `auth/logout`, `auth/refresh` | Аутентификация на защищенных ESPHome-серверах (`login`), отзыв токенов сессии (`logout`) и продление доступа (`refresh`) |
+| 29 | `get_server_version()` | internal / SSOT | Получение информации о версии MCP-сервера (SemVer), протоколе, ресурсах и промптах |
+
+---
+
+### 📦 Контекстные ресурсы MCP (MCP Resources)
+
+Сервер предоставляет языковым моделям и AI-ассистентам прямой доступ к контексту через URI протокола MCP без необходимости дополнительных вызовов инструментов:
+
+| Ресурс (URI) | MIME-тип | Описание |
+|---|:---:|---|
+| `esphome://devices` | `application/json` | Актуальный живой реестр всех устройств ESPHome с их IP-адресами, статусом онлайн/офлайн (на основе `devices/get_states`), версиями прошивок и платформами. |
+| `esphome://configs/{configuration}` | `text/yaml` | Прямое чтение исходного YAML-кода конфигурации устройства для мгновенной передачи в контекст чата (`@esphome://configs/test.yaml`). |
+| `esphome://components/{component_id}` | `application/json` | Детальный паспорт компонента (схема `config_entries`, требования к шинам I2C/SPI, поддерживаемые платформы). |
+| `esphome://boards/{board_id}` | `application/json` | Спецификация платы микроконтроллера и аппаратная распиновка пинов GPIO (доступность, strapping, Flash). |
+
+---
+
+### 💬 Интерактивные стандартизированные промпты MCP (MCP Prompts)
+
+Готовые шаблоны регламентов и чеклистов для автономного выполнения сложных инженерных задач:
+
+| Промпт (Prompt) | Аргументы | Назначение |
+|---|---|---|
+| `new_device_wizard` | `board_id`, `device_name`, `friendly_name`, `components` | Пошаговый мастер проектирования нового устройства умного дома: аудит платы, проверка шин, генерация конфига, валидация и тестовая компиляция. |
+| `troubleshoot_offline_device` | `configuration` (обязательный) | Регламент автономной диагностики оффлайн-узла: сетевой зонд (Ping/DNS/mDNS), анализ недавних коммитов Git, проверка дампов паники и откат прошивки. |
+| `safe_firmware_upgrade` | `configuration` (обязательный), `target_port` | Чеклист безопасного обновления прошивки: контрольная точка отката, валидация синтаксиса, профилирование памяти, OTA-прошивка и пост-мониторинг запуска. |
 
 ---
 
@@ -255,7 +282,7 @@ gemini mcp add esphome-local -- /ПОЛНЫЙ/ПУТЬ/К/ESPHomeLocalMCP/.venv/
 
 Для эффективной работы AI-ассистентов (Cursor, Antigravity, VS Code Copilot, Claude Desktop, Windsurf, Aider) в проектах разработки и управления устройствами ESPHome подготовлены специализированные руководства:
 
-- [**`docs/ESPHOME_AGENT_GUIDE.md`**](docs/ESPHOME_AGENT_GUIDE.md) — **Инструкция для AI-агентов**: Золотые правила разработки, 7 типовых сценариев (создание с нуля, AST-автоматизации, сборка, расшифровка сбоев, работа с секретами) и полный справочник 27 инструментов.
+- [**`docs/ESPHOME_AGENT_GUIDE.md`**](docs/ESPHOME_AGENT_GUIDE.md) — **Инструкция для AI-агентов**: Золотые правила разработки, 7 типовых сценариев (создание с нуля, AST-автоматизации, сборка, расшифровка сбоев, работа с секретами) и полный справочник 29 инструментов.
 - [**`docs/USER_INTEGRATION_GUIDE.md`**](docs/USER_INTEGRATION_GUIDE.md) — **Руководство пользователя по интеграции**: Пошаговые примеры подключения файла инструкций к проектам для различных AI IDE (`.agents/rules/`, `.cursorrules`, `.cursor/rules/*.mdc`, `.github/copilot-instructions.md`, `CLAUDE.md`, `.windsurfrules`).
 
 ## 🗺 Дорожная карта развития (Roadmap)

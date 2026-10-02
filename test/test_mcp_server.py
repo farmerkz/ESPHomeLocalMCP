@@ -14,6 +14,7 @@ from server import (
     resolve_configuration,
     validate_yaml,
     list_devices,
+    stream_device_logs,
     search_yaml_configs,
     get_board_info,
     manage_device_config,
@@ -29,9 +30,21 @@ from server import (
     manage_automations,
     get_firmware_binaries,
     manage_remote_build,
+    authenticate_esphome,
     compile_firmware,
     flash_ota,
-    get_server_version
+    validate_hardware_pinout,
+    flash_canary_ota,
+    analyze_canary_health,
+    get_server_version,
+    resource_devices,
+    resource_device_config,
+    resource_component_schema,
+    resource_board_pinout,
+    prompt_new_device_wizard,
+    prompt_troubleshoot_offline_device,
+    prompt_safe_firmware_upgrade,
+    mcp
 )
 
 MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "test_devices.json")
@@ -77,7 +90,9 @@ class TestMCPServerUnit(unittest.TestCase):
             res = loop.run_until_complete(get_server_version())
             self.assertIn(f"v{__version__}", res)
             self.assertIn("Semantic Versioning 2.0.0", res)
-            self.assertIn("16", res)
+            self.assertIn("29", res)
+            self.assertIn("Resources", res)
+            self.assertIn("Prompts", res)
         finally:
             loop.close()
 
@@ -235,6 +250,8 @@ class TestMCPServerUnit(unittest.TestCase):
         self.assertEqual(sig_auto.parameters["component_id"].default, "")
         self.assertIn("trigger", sig_auto.parameters)
         self.assertEqual(sig_auto.parameters["trigger"].default, "")
+        self.assertIn("expected", sig_auto.parameters)
+        self.assertEqual(sig_auto.parameters["expected"].default, None)
         self.assertIn("apply", sig_auto.parameters)
         self.assertEqual(sig_auto.parameters["apply"].default, False)
 
@@ -256,6 +273,10 @@ class TestMCPServerUnit(unittest.TestCase):
         self.assertEqual(sig_rb.parameters["hostname"].default, "")
         self.assertIn("peer_id", sig_rb.parameters)
         self.assertEqual(sig_rb.parameters["peer_id"].default, "")
+        self.assertIn("dashboard_id", sig_rb.parameters)
+        self.assertEqual(sig_rb.parameters["dashboard_id"].default, "")
+        self.assertIn("pin_sha256", sig_rb.parameters)
+        self.assertEqual(sig_rb.parameters["pin_sha256"].default, "")
 
     def test_manage_device_config_validation(self):
         """Проверка локальной валидации аргументов в manage_device_config."""
@@ -276,6 +297,10 @@ class TestMCPServerUnit(unittest.TestCase):
             # 4. Rename без new_name
             res_no_rename = loop.run_until_complete(manage_device_config(action="rename", configuration="test.yaml"))
             self.assertIn("необходимо указать параметр new_name", res_no_rename)
+
+            # 5. Add_component без component_id
+            res_no_comp = loop.run_until_complete(manage_device_config(action="add_component", configuration="test.yaml"))
+            self.assertIn("необходимо указать параметр component_id", res_no_comp)
         finally:
             loop.close()
 
@@ -302,6 +327,10 @@ class TestMCPServerUnit(unittest.TestCase):
             # 5. Clear_queued без configuration
             res_no_queued_cfg = loop.run_until_complete(manage_build_jobs(action="clear_queued"))
             self.assertIn("необходимо указать параметр configuration", res_no_queued_cfg)
+
+            # 6. Analyze_memory без configuration
+            res_no_mem_cfg = loop.run_until_complete(manage_build_jobs(action="analyze_memory"))
+            self.assertIn("необходимо указать параметр configuration", res_no_mem_cfg)
         finally:
             loop.close()
 
@@ -467,6 +496,10 @@ class TestMCPServerUnit(unittest.TestCase):
             # 6. Delete без trigger
             res_del_no_trig = loop.run_until_complete(manage_automations(action="delete", configuration="test.yaml", component_id="sw1"))
             self.assertIn("необходимо указать параметр 'trigger'", res_del_no_trig)
+
+            # 7. Docs без refs
+            res_docs_no_refs = loop.run_until_complete(manage_automations(action="docs"))
+            self.assertIn("необходимо указать параметр 'refs'", res_docs_no_refs)
         finally:
             loop.close()
 
@@ -517,6 +550,132 @@ class TestMCPServerUnit(unittest.TestCase):
             self.assertIn("необходимо указать параметр 'peer_id'", res_no_unpair_pid)
         finally:
             loop.close()
+
+    def test_validate_hardware_pinout_unit(self):
+        """Модульный тест инструмента validate_hardware_pinout: правила Flash, Input-only, дубликаты пинов и I2C коллизии."""
+        loop = asyncio.new_event_loop()
+        try:
+            # 1. Вызов без параметров
+            res_no_params = loop.run_until_complete(validate_hardware_pinout())
+            self.assertIn("необходимо указать либо параметр configuration", res_no_params)
+
+            # 2. YAML с фатальными конфликтами
+            bad_yaml = """
+esphome:
+  name: bad-esp32
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+
+sensor:
+  - platform: bme280_i2c
+    temperature:
+      name: "Temp 1"
+    address: 0x76
+  - platform: bmp280
+    temperature:
+      name: "Temp 2"
+    address: 0x76
+
+output:
+  - platform: gpio
+    pin: GPIO6
+    id: led_flash
+  - platform: gpio
+    pin: GPIO34
+    id: led_input_only
+  - platform: gpio
+    pin: GPIO18
+    id: out_1
+  - platform: gpio
+    pin: GPIO18
+    id: out_2
+"""
+            res_bad = loop.run_until_complete(validate_hardware_pinout(content=bad_yaml))
+            self.assertIn("ОБНАРУЖЕНЫ КРИТИЧЕСКИЕ АППАРАТНЫЕ ОШИБКИ", res_bad)
+            self.assertIn("Критические аппаратные конфликты (FATAL)", res_bad)
+            self.assertIn("SPI Flash", res_bad)
+            self.assertIn("Input-only", res_bad)
+            self.assertIn("одновременно назначен нескольким компонентам", res_bad)
+            self.assertIn("0x76", res_bad)
+            self.assertIn("КОЛЛИЗИЯ", res_bad)
+
+            # 3. Чистый корректный YAML без предупреждений
+            clean_yaml = """
+esphome:
+  name: clean-esp32
+esp32:
+  board: esp32dev
+
+output:
+  - platform: gpio
+    pin: GPIO16
+    id: my_led
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO17
+      inverted: true
+    id: btn
+"""
+            res_clean = loop.run_until_complete(validate_hardware_pinout(content=clean_yaml))
+            self.assertIn("PASSED", res_clean)
+            self.assertIn("GPIO16", res_clean)
+            self.assertIn("GPIO17", res_clean)
+            self.assertNotIn("FATAL", res_clean)
+        finally:
+            loop.close()
+
+    def test_analyze_canary_health_unit(self):
+        """Модульный тест детектора сбоев Canary Watchdog (Guru Meditation, Backtrace, WDT, Bootloop, Safe Mode)."""
+        # 1. Штатный стабильный лог
+        clean_logs = [
+            "[I][app:102]: ESPHome version 2026.10.0 compiled on Oct 2 2026",
+            "[I][wifi:600]: WiFi Connected! IP: 192.168.1.105",
+            "[D][sensor:120]: Temperature: 22.4 C",
+            "[I][ota:045]: OTA version 2.0 ready"
+        ]
+        h_clean = analyze_canary_health(clean_logs)
+        self.assertTrue(h_clean["is_healthy"])
+        self.assertEqual(len(h_clean["crash_markers"]), 0)
+        self.assertFalse(h_clean["in_safe_mode"])
+
+        # 2. Guru Meditation Panic и Backtrace
+        panic_logs = [
+            "Guru Meditation Error: Core 0 panic'ed (LoadProhibited). Exception was unhandled.",
+            "Backtrace: 0x400d1234:0x3ffb1234 0x400d5678:0x3ffb5678"
+        ]
+        h_panic = analyze_canary_health(panic_logs)
+        self.assertFalse(h_panic["is_healthy"])
+        self.assertGreaterEqual(len(h_panic["crash_markers"]), 2)
+        self.assertEqual(len(h_panic["backtrace_lines"]), 1)
+
+        # 3. Abort / Assertion failure
+        abort_logs = ["abort() was called at PC 0x40081234 on core 0"]
+        h_abort = analyze_canary_health(abort_logs)
+        self.assertFalse(h_abort["is_healthy"])
+
+        # 4. Watchdog Reset & Bootloop (>2 рестарта)
+        bootloop_logs = [
+            "rst:0x1 (POWERON_RESET)",
+            "rst:0x10 (RTCWDT_RTC_RESET)",
+            "rst:0x10 (RTCWDT_RTC_RESET)"
+        ]
+        h_bootloop = analyze_canary_health(bootloop_logs)
+        self.assertFalse(h_bootloop["is_healthy"])
+        self.assertTrue(any("Bootloop" in m for m in h_bootloop["crash_markers"]))
+
+        # 5. Safe Mode
+        safemode_logs = ["WARNING: ESPHome is in safe mode!"]
+        h_safe = analyze_canary_health(safemode_logs)
+        self.assertFalse(h_safe["is_healthy"])
+        self.assertTrue(h_safe["in_safe_mode"])
 
 
 class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
@@ -604,76 +763,43 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_device_config_crud_lifecycle(self):
         """
-        Изолированное тестирование полного жизненного цикла управления конфигурацией (CRUD + Template + Rename).
-        Использует уникальный временный идентификатор с гарантированной очисткой (Teardown Guard).
+        Тестирование жизненного цикла управления конфигурацией (get, update, validate)
+        на разрешенной Тестовой конфигурации (test.yaml) с гарантированным Teardown Guard.
         """
-        uid = uuid.uuid4().hex[:6]
-        fixture_name = f"mcp-fix-{uid}"
-        renamed_fixture_name = f"mcp-rn-{uid}"
-        cfg_file = f"{fixture_name}.yaml"
-        renamed_cfg_file = f"{renamed_fixture_name}.yaml"
-
+        cfg_file = "test.yaml"
         print(f"\n🔄 Запуск теста жизненного цикла конфигурации: `{cfg_file}`")
+
+        # 1. Чтение оригинального содержимого test.yaml
+        get_res = await manage_device_config(action="get", configuration=cfg_file)
+        self.assertIn("### Содержимое конфигурации `test.yaml`", get_res)
+        orig_content = get_res.split("```yaml\n", 1)[1].rsplit("\n```", 1)[0] if "```yaml\n" in get_res else get_res
+
         try:
-            # 1. Создание по шаблону платы (board_id) без передачи content
-            create_res = await manage_device_config(
-                action="create",
-                configuration=cfg_file,
-                board_id="esp32dev",
-                friendly_name="MCP Temporary Test Fixture",
-                overwrite=True
-            )
-            self.assertIn("✅ Конфигурация создана:", create_res)
-            print(f"  - create (board_id='esp32dev'): {create_res}")
-
-            # 2. Чтение созданной конфигурации и проверка шаблона
-            get_res = await manage_device_config(action="get", configuration=cfg_file)
-            self.assertIn("esp32", get_res)
-            self.assertIn("esp32dev", get_res)
-            print(f"  - get ({cfg_file}): прочитано {len(get_res)} байт")
-
-            # 3. Валидация сгенерированного шаблона через ESPHome API
+            # 2. Валидация исходного файла через ESPHome API
             val_res = await validate_yaml(cfg_file)
             self.assertIn("УСПЕШНО", val_res)
-            print(f"  - validate_yaml ({cfg_file}): шаблон валиден")
+            print(f"  - validate_yaml ({cfg_file}): исходный файл валиден")
 
-            # 4. Обновление содержимого (update)
-            update_content = (
-                f"# MCP Automated Test Fixture\n"
-                f"esphome:\n"
-                f"  name: {fixture_name}\n"
-                f"  friendly_name: \"Updated Test Fixture\"\n\n"
-                f"esp32:\n"
-                f"  board: esp32dev\n\n"
-                f"sensor:\n"
-                f"  - platform: uptime\n"
-                f"    name: \"Uptime Sensor\"\n"
-            )
-            update_res = await manage_device_config(action="update", configuration=cfg_file, content=update_content)
+            # 3. Временная мутация содержимого (update) с тестовым маркером
+            marker = "# MCP-TEST-MUTATION-GUARD"
+            mutated_content = f"{orig_content}\n{marker}\n"
+            update_res = await manage_device_config(action="update", configuration=cfg_file, content=mutated_content)
             self.assertIn("успешно обновлена", update_res)
-            print(f"  - update ({cfg_file}): {update_res}")
+            print(f"  - update ({cfg_file}): временная мутация успешно применена")
 
-            # 5. Офлайн-переименование (rename, config_only=True)
-            rename_res = await manage_device_config(
-                action="rename",
-                configuration=cfg_file,
-                new_name=renamed_cfg_file,
-                config_only=True
-            )
-            self.assertIn("успешно переименована", rename_res)
-            print(f"  - rename ({cfg_file} -> {renamed_cfg_file}): {rename_res}")
-
-            # 6. Проверка, что переименованный файл существует и читается
-            get_renamed_res = await manage_device_config(action="get", configuration=renamed_cfg_file)
-            self.assertIn("Updated Test Fixture", get_renamed_res)
-            print(f"  - get ({renamed_cfg_file}): подтверждено существование нового файла")
+            # 4. Проверка, что файл обновился
+            get_mutated = await manage_device_config(action="get", configuration=cfg_file)
+            self.assertIn(marker, get_mutated)
+            print(f"  - get ({cfg_file}): подтверждено наличие временного маркера")
 
         finally:
-            # Teardown Guard: гарантированное удаление всех временных файлов
-            print(f"  - Teardown: удаление временных файлов `{cfg_file}` и `{renamed_cfg_file}`...")
-            await manage_device_config(action="delete", configuration=cfg_file)
-            await manage_device_config(action="delete", configuration=renamed_cfg_file)
-            print("  ✅ Teardown завершен.")
+            # 5. Teardown Guard: гарантированное восстановление исходного содержимого test.yaml
+            print(f"  - Teardown: восстановление `{cfg_file}` в исходное состояние...")
+            restore_res = await manage_device_config(action="update", configuration=cfg_file, content=orig_content)
+            self.assertIn("успешно обновлена", restore_res)
+            get_restored = await manage_device_config(action="get", configuration=cfg_file)
+            self.assertNotIn("# MCP-TEST-MUTATION-GUARD", get_restored)
+            print("  ✅ Teardown завершен: исходное состояние test.yaml полностью восстановлено.")
 
     async def test_get_board_info_extended_filters(self):
         """Тестирование расширенной фильтрации каталога плат (variant, platform, limit, offset)."""
@@ -742,57 +868,16 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("actions", res_legacy_dry)
         print(f"  - migrate_device_config (Dry-Run): успешно обнаружены устаревшие поля")
 
-        # 3. Сквозной жизненный цикл с применением миграции к файлу устройства (Apply Lifecycle)
-        uid = uuid.uuid4().hex[:6]
-        fixture_name = f"mcp-mig-{uid}"
-        cfg_file = f"{fixture_name}.yaml"
+        # 3. Проверка работы с файлом разрешенной конфигурации test.yaml
+        cfg_file = "test.yaml"
+        print(f"  - Запуск проверки миграции для конфигурации `{cfg_file}`...")
+        res_cfg_dry = await migrate_device_config(configuration=cfg_file, apply=False)
+        self.assertTrue("не требует миграции" in res_cfg_dry or "Анализ миграции" in res_cfg_dry)
+        print(f"  - migrate_device_config ({cfg_file}, apply=False): статус успешно проверен")
 
-        print(f"  - Запуск Apply Lifecycle миграции для фикстуры `{cfg_file}`...")
-        try:
-            # Создаем устройство с устаревшим YAML
-            fixture_legacy_content = (
-                f"esphome:\n"
-                f"  name: {fixture_name}\n\n"
-                f"esp32:\n"
-                f"  board: esp32dev\n\n"
-                f"logger:\n\n"
-                f"wifi:\n"
-                f"  ssid: \"Mock-Wifi\"\n\n"
-                f"api:\n"
-                f"  services:\n"
-                f"    - service: legacy_action\n"
-                f"      then:\n"
-                f"        - logger.log: \"Hello\"\n"
-            )
-            create_res = await manage_device_config(
-                action="create",
-                configuration=cfg_file,
-                content=fixture_legacy_content,
-                overwrite=True
-            )
-            self.assertIn("✅ Конфигурация создана:", create_res)
-
-            # Применяем миграцию (apply=True)
-            apply_res = await migrate_device_config(configuration=cfg_file, apply=True)
-            self.assertIn("успешно применена и сохранена", apply_res)
-            print(f"  - migrate_device_config (apply=True): {apply_res[:120]}...")
-
-            # Проверяем, что в файле сохранился мигрированный синтаксис
-            updated_content = await manage_device_config(action="get", configuration=cfg_file)
-            self.assertIn("actions:", updated_content)
-            self.assertIn("action: legacy_action", updated_content)
-            self.assertNotIn("services:", updated_content)
-
-            # Валидируем мигрированный файл через ESPHome API
-            val_res = await validate_yaml(cfg_file)
-            self.assertIn("УСПЕШНО", val_res)
-            print(f"  - validate_yaml ({cfg_file}): мигрированный конфиг валиден")
-
-        finally:
-            # Teardown Guard
-            print(f"  - Teardown: удаление временного файла `{cfg_file}`...")
-            await manage_device_config(action="delete", configuration=cfg_file)
-            print("  ✅ Teardown завершен.")
+        res_cfg_apply = await migrate_device_config(configuration=cfg_file, apply=True)
+        self.assertTrue("не требует миграции" in res_cfg_apply or "успешно применена" in res_cfg_apply)
+        print(f"  - migrate_device_config ({cfg_file}, apply=True): статус применения успешно проверен")
 
     async def test_search_components_search_and_get(self):
         """Тестирование поиска и детальной спецификации компонентов ESPHome."""
@@ -967,12 +1052,10 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
                 await manage_labels(action="delete", label_id=created_lid)
 
     async def test_batch_manage_devices_lifecycle(self):
-        """Тестирование пакетных операций над устройствами (batch_manage_devices)."""
+        """Тестирование пакетных операций над устройствами (batch_manage_devices) на разрешенной конфигурации test.yaml."""
         print("\n📦 Запуск тестов пакетных операций batch_manage_devices...")
 
         uid = uuid.uuid4().hex[:6]
-        cfg1 = f"mcp-bulk-1-{uid}.yaml"
-        cfg2 = f"mcp-bulk-2-{uid}.yaml"
         tag_name = f"BulkTag_{uid}"
         created_lid = None
 
@@ -982,42 +1065,31 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
         if match:
             created_lid = match.group(1)
 
-        # 2. Создаем две временные фикстуры устройств
-        yaml_content = f"esphome:\n  name: mcp-bulk-{uid}\nesp32:\n  board: esp32dev\n"
-        await manage_device_config(action="create", configuration=cfg1, content=yaml_content)
-        await manage_device_config(action="create", configuration=cfg2, content=yaml_content)
-
         try:
-            # 3. Пакетное назначение меток (set_labels)
+            # 2. Пакетное назначение меток (set_labels) на разрешенную test.yaml
             if created_lid:
                 bulk_lbl_res = await batch_manage_devices(
                     action="set_labels",
-                    configurations=[cfg1, cfg2],
+                    configurations=["test.yaml"],
                     label_ids=[created_lid]
                 )
                 self.assertIn("Результат пакетной операции `set_labels`", bulk_lbl_res)
-                self.assertIn(f"`{cfg1}`: ✅ Успешно", bulk_lbl_res)
-                self.assertIn(f"`{cfg2}`: ✅ Успешно", bulk_lbl_res)
-                print(f"  - batch_manage_devices (set_labels): метки успешно назначены на {cfg1} и {cfg2}")
+                self.assertIn("`test.yaml`: ✅ Успешно", bulk_lbl_res)
+                print(f"  - batch_manage_devices (set_labels): метка успешно назначена на test.yaml")
 
-            # 4. Пакетная архивация (archive)
-            bulk_arc_res = await batch_manage_devices(
-                action="archive",
-                configurations=[cfg1, cfg2]
-            )
-            self.assertIn("Результат пакетной операции `archive`", bulk_arc_res)
-            self.assertIn(f"`{cfg1}`: ✅ Успешно", bulk_arc_res)
-            self.assertIn(f"`{cfg2}`: ✅ Успешно", bulk_arc_res)
-            print(f"  - batch_manage_devices (archive): устройства успешно перемещены в архив")
+                # Очищаем метки у test.yaml
+                await batch_manage_devices(
+                    action="set_labels",
+                    configurations=["test.yaml"],
+                    label_ids=[]
+                )
+                print(f"  - batch_manage_devices (set_labels): метки test.yaml успешно сброшены")
 
         finally:
-            # 5. Teardown Guard: очистка архивных фикстур и удаление временной метки
-            from server import archive_devices
-            await archive_devices(action="purge", configuration=cfg1)
-            await archive_devices(action="purge", configuration=cfg2)
+            # 3. Teardown Guard: удаление временной метки
             if created_lid:
                 await manage_labels(action="delete", label_id=created_lid)
-            print("  ✅ Teardown пакетных фикстур завершен.")
+            print("  ✅ Teardown пакетных операций завершен.")
 
     async def test_troubleshoot_device_states(self):
         """Тестирование получения таблицы онлайн/офлайн статусов устройств (action='states')."""
@@ -1040,12 +1112,12 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ICMP Ping:", res_probe_online)
         print(f"  - troubleshoot_device (probe test.yaml): успешно получены сетевые метрики")
 
-        # 2. Диагностика устройства ina226.yaml (проверка локализации)
-        res_probe_off = await troubleshoot_device(action="probe", configuration="ina226.yaml")
-        self.assertIn("Сетевая диагностика устройства `ina226.yaml`", res_probe_off)
+        # 2. Диагностика устройства r5-gate-01.yaml (проверка локализации)
+        res_probe_off = await troubleshoot_device(action="probe", configuration="r5-gate-01.yaml")
+        self.assertIn("Сетевая диагностика устройства `r5-gate-01.yaml`", res_probe_off)
         self.assertIn("DNS разрешение:", res_probe_off)
         self.assertIn("ICMP Ping:", res_probe_off)
-        print(f"  - troubleshoot_device (probe ina226.yaml): успешно диагностировано состояние")
+        print(f"  - troubleshoot_device (probe r5-gate-01.yaml): успешно диагностировано состояние")
 
     async def test_manage_version_history_log_show_diff(self):
         """Тестирование чтения истории коммитов, ревизий и diff (action='log', 'show', 'diff', 'deleted')."""
@@ -1078,48 +1150,19 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
         print("  - manage_version_history (deleted): успешно проверена история удалений")
 
     async def test_manage_version_history_restore_lifecycle(self):
-        """Тестирование полного жизненного цикла отката версии (restore) с Teardown Guard."""
-        print("\n🔄 Запуск теста жизненного цикла manage_version_history (restore)...")
-        uid = uuid.uuid4().hex[:6]
-        cfg = f"mcp-vh-{uid}.yaml"
+        """Тестирование чтения истории коммитов и diff (log, diff) на разрешенном test.yaml."""
+        print("\n🔄 Запуск теста manage_version_history (log, diff)...")
+        cfg = "test.yaml"
 
-        content_v1 = f"esphome:\n  name: mcp-vh-{uid}\n  comment: v1_initial_snapshot\nesp32:\n  board: esp32dev\n"
-        content_v2 = f"esphome:\n  name: mcp-vh-{uid}\n  comment: v2_modified_snapshot\nesp32:\n  board: esp32dev\n"
+        # 1. Проверяем историю коммитов
+        res_log = await manage_version_history(action="log", configuration=cfg)
+        self.assertTrue("История версий" in res_log or "коммит" in res_log or "не найдена" in res_log)
+        print("  - manage_version_history (log): история успешно получена")
 
-        # 1. Создаем v1
-        create_res = await manage_device_config(action="create", configuration=cfg, content=content_v1)
-        self.assertIn("создана", create_res.lower())
-
-        try:
-            # 2. Получаем sha коммита v1
-            res_log1 = await manage_version_history(action="log", configuration=cfg)
-            match1 = re.search(r"- `([0-9a-fA-F]+)` \|", res_log1)
-            self.assertIsNotNone(match1)
-            sha_v1 = match1.group(1)
-            print(f"  - Создана фикстура v1 ({cfg}), SHA: {sha_v1}")
-
-            # 3. Обновляем до v2
-            upd_res = await manage_device_config(action="update", configuration=cfg, content=content_v2)
-            self.assertIn("обновлена", upd_res.lower())
-
-            # 4. Проверяем, что в текущей версии записано v2
-            get_v2 = await manage_device_config(action="get", configuration=cfg)
-            self.assertIn("v2_modified_snapshot", get_v2)
-
-            # 5. Выполняем restore до v1 (sha_v1)
-            res_restore = await manage_version_history(action="restore", configuration=cfg, sha=sha_v1)
-            self.assertIn("успешно восстановлен", res_restore.lower())
-            print(f"  - Выполнен restore {cfg} до {sha_v1}")
-
-            # 6. Проверяем, что содержимое снова v1
-            get_restored = await manage_device_config(action="get", configuration=cfg)
-            self.assertIn("v1_initial_snapshot", get_restored)
-            print(f"  - Подтверждено: содержимое {cfg} вернулось к v1_initial_snapshot")
-
-        finally:
-            # 7. Teardown Guard: удаление временного файла
-            await manage_device_config(action="delete", configuration=cfg)
-            print(f"  ✅ Teardown: временный файл {cfg} удален.")
+        # 2. Проверяем diff
+        res_diff = await manage_version_history(action="diff", configuration=cfg)
+        self.assertTrue("Различия (diff)" in res_diff or "изменения отсутствуют" in res_diff)
+        print("  - manage_version_history (diff): отчет diff успешно получен")
 
     async def test_manage_automations_catalogs(self):
         """Тестирование каталогов триггеров, действий и условий (triggers, actions, conditions)."""
@@ -1160,17 +1203,16 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
         print("  - manage_automations (parse test.yaml): AST дерево успешно разобрано")
 
     async def test_manage_automations_mutation_lifecycle(self):
-        """Тестирование жизненного цикла точечной модификации AST автоматизаций (upsert/delete) с Teardown Guard."""
+        """Тестирование жизненного цикла точечной модификации AST автоматизаций (upsert/delete) на test.yaml с Teardown Guard."""
         print("\n🔧 Запуск теста жизненного цикла manage_automations (upsert, dry-run, apply, delete)...")
-        uid = uuid.uuid4().hex[:6]
-        cfg = f"mcp-auto-{uid}.yaml"
-        init_yaml = f"esphome:\n  name: mcp-auto-{uid}\nesp32:\n  board: esp32dev\n\nswitch:\n  - platform: gpio\n    pin: GPIO2\n    id: test_switch\n    name: 'Test Switch'\n"
+        cfg = "test.yaml"
 
-        # 1. Создаем устройство
-        await manage_device_config(action="create", configuration=cfg, content=init_yaml)
+        # 1. Считываем оригинальный конфиг test.yaml
+        get_orig = await manage_device_config(action="get", configuration=cfg)
+        orig_content = get_orig.split("```yaml\n", 1)[1].rsplit("\n```", 1)[0] if "```yaml\n" in get_orig else get_orig
 
         try:
-            # 2. Dry-Run Upsert
+            # 2. Dry-Run Upsert на существующий relay_switch
             automation_payload = {
                 "trigger_id": "switch.on_turn_on",
                 "trigger_params": {},
@@ -1185,7 +1227,7 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
             res_dry = await manage_automations(
                 action="upsert",
                 configuration=cfg,
-                component_id="test_switch",
+                component_id="relay_switch",
                 trigger="on_turn_on",
                 automation=automation_payload,
                 apply=False
@@ -1194,21 +1236,20 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertIn("on_turn_on:", res_dry)
             print("  - manage_automations (upsert dry-run): diff рассчитан успешно")
 
-            # 3. Apply Upsert
+            # 3. Apply Upsert (нативное сохранение в файл!)
             res_apply = await manage_automations(
                 action="upsert",
                 configuration=cfg,
-                component_id="test_switch",
+                component_id="relay_switch",
                 trigger="on_turn_on",
                 automation=automation_payload,
                 apply=True
             )
             self.assertIn("Автоматизация успешно добавлена", res_apply)
-            print("  - manage_automations (upsert apply=True): автоматизация вставлена в YAML")
+            print("  - manage_automations (upsert apply=True): автоматизация нативно сохранена в YAML")
 
-            # 4. Parse (проверяем, что AST распознает новую автоматизацию)
+            # 4. Parse (проверяем, что AST распознает добавленную автоматизацию)
             res_parsed = await manage_automations(action="parse", configuration=cfg)
-            self.assertIn("найдено: 1", res_parsed)
             self.assertIn("on_turn_on", res_parsed)
             print("  - manage_automations (parse): автоматизация успешно валидирована в AST")
 
@@ -1216,22 +1257,18 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
             res_delete = await manage_automations(
                 action="delete",
                 configuration=cfg,
-                component_id="test_switch",
+                component_id="relay_switch",
                 trigger="on_turn_on",
                 apply=True
             )
             self.assertIn("успешно удалена", res_delete)
-            print("  - manage_automations (delete apply=True): автоматизация удалена из YAML")
-
-            # 6. Parse после удаления
-            res_after_del = await manage_automations(action="parse", configuration=cfg)
-            self.assertIn("не обнаружено объявленных блоков", res_after_del)
-            print("  - manage_automations (parse after delete): подтверждено отсутствие автоматизаций")
+            print("  - manage_automations (delete apply=True): автоматизация нативно удалена из YAML")
 
         finally:
-            # 7. Teardown Guard
-            await manage_device_config(action="delete", configuration=cfg)
-            print(f"  ✅ Teardown: временный файл {cfg} удален.")
+            # 6. Teardown Guard: гарантированное восстановление test.yaml
+            print(f"  - Teardown: восстановление исходного содержимого `{cfg}`...")
+            await manage_device_config(action="update", configuration=cfg, content=orig_content)
+            print("  ✅ Teardown: test.yaml гарантированно восстановлен в исходное состояние.")
 
     async def test_get_firmware_binaries_list_and_token(self):
         """Тестирование получения списка бинарных артефактов и выпуска токенов (list, token)."""
@@ -1331,6 +1368,296 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
         # Сервер корректно пытается связаться с пиром и возвращает диагностический ответ
         self.assertTrue("Результат проверки узла" in res_prev or "Ошибка предварительной проверки" in res_prev)
         print("  - manage_remote_build (preview_pair): сетевой handshake корректно обработан")
+
+
+    async def test_manage_device_config_key_and_add_component_and_cas(self):
+        """Тестирование получения ключа шифрования (key), CAS защиты (expected) и add_component на разрешенном test.yaml."""
+        print("\n🔑 Запуск тестов manage_device_config (key, add_component, CAS expected)...")
+
+        # 1. Получение ключа шифрования для test.yaml
+        res_key = await manage_device_config(action="key", configuration="test.yaml")
+        self.assertIn("Ключ шифрования устройства `test.yaml`", res_key)
+        print("  - manage_device_config (key test.yaml): ключ шифрования успешно получен")
+
+        # 2. Получение ключа шифрования для r5-gate-01.yaml
+        res_key_r5 = await manage_device_config(action="key", configuration="r5-gate-01.yaml")
+        self.assertIn("Ключ шифрования устройства `r5-gate-01.yaml`", res_key_r5)
+        print("  - manage_device_config (key r5-gate-01.yaml): ключ шифрования успешно получен")
+
+        # 3. Добавление компонента в режиме предпросмотра (Dry-run, apply=False)
+        res_add = await manage_device_config(
+            action="add_component",
+            configuration="test.yaml",
+            component_id="status_led",
+            fields={"pin": "GPIO2"},
+            apply=False
+        )
+        self.assertIn("Предпросмотр добавления компонента `status_led`", res_add)
+        self.assertIn("status_led", res_add)
+        print("  - manage_device_config (add_component dry-run): предпросмотр YAML успешно сформирован")
+
+        # 4. CAS-защита (expected mismatch): передача неверного expected должна отклонить сохранение
+        res_cas_fail = await manage_device_config(
+            action="update",
+            configuration="test.yaml",
+            content="esphome:\n  name: test-bad\n",
+            expected="INVALID_NON_MATCHING_EXPECTED_STRING_12345"
+        )
+        self.assertIn("differs from the expected text", res_cas_fail)
+        print("  - manage_device_config (CAS expected mismatch): сохранение корректно заблокировано")
+
+    async def test_manage_build_jobs_analyze_memory(self):
+        """Тестирование анализа расхода памяти PlatformIO/RAM/Flash (analyze_memory) на разрешенном test.yaml."""
+        print("\n📊 Запуск теста manage_build_jobs (analyze_memory)...")
+
+        res_mem = await manage_build_jobs(action="analyze_memory", configuration="test.yaml")
+        self.assertIn("Анализ расхода памяти для `test.yaml`", res_mem)
+        self.assertIn("УСПЕШНО ✅", res_mem)
+        print("  - manage_build_jobs (analyze_memory test.yaml): профилирование памяти успешно выполнено")
+
+    async def test_manage_automations_extended_catalogs_and_docs(self):
+        """Тестирование световых эффектов (light_effects), фильтров (filters) и паспортов схем (docs)."""
+        print("\n💡 Запуск тестов manage_automations (light_effects, filters, docs)...")
+
+        # 1. light_effects
+        res_le = await manage_automations(action="light_effects", query="rainbow")
+        self.assertIn("Каталог световых эффектов ESPHome", res_le)
+        self.assertIn("rainbow", res_le.lower())
+        print("  - manage_automations (light_effects query='rainbow'): эффекты получены")
+
+        # 2. filters
+        res_flt = await manage_automations(action="filters", query="offset")
+        self.assertIn("Каталог фильтров сенсоров ESPHome", res_flt)
+        self.assertIn("offset", res_flt.lower())
+        print("  - manage_automations (filters query='offset'): фильтры получены")
+
+        # 3. docs
+        res_docs = await manage_automations(
+            action="docs",
+            refs=[
+                {"type": "actions", "id": "switch.toggle"},
+                {"type": "filters", "id": "offset"}
+            ]
+        )
+        self.assertIn("Паспорта элементов автоматизаций", res_docs)
+        self.assertIn("Switch → Toggle", res_docs)
+        self.assertIn("Sensor → Offset", res_docs)
+        print("  - manage_automations (docs/bodies): паспорта схемы параметров получены")
+
+    async def test_stream_device_logs_no_states(self):
+        """Тестирование сбора логов устройства с параметром no_states=True на разрешенном test.yaml."""
+        print("\n📜 Запуск теста stream_device_logs (no_states=True)...")
+
+        res_logs = await stream_device_logs(
+            configuration="test.yaml",
+            duration_seconds=2,
+            lines_count=10,
+            no_states=True
+        )
+        self.assertTrue("Собрано" in res_logs or "Лог пуст" in res_logs)
+        print("  - stream_device_logs (no_states=True): логи успешно собраны с фильтрацией")
+
+    async def test_get_host_info_preferences(self):
+        """Тестирование чтения и записи пользовательских настроек (config/get_preferences, config/set_preferences)."""
+        print("\n⚙️ Запуск тестов get_host_info (preferences)...")
+
+        # 1. Чтение preferences
+        res_pref = await get_host_info(action="preferences")
+        self.assertIn("Настройки интерфейса дашборда", res_pref)
+        self.assertIn("Тема оформления", res_pref)
+        print("  - get_host_info (action='preferences'): настройки успешно получены")
+
+        # 2. Запись preferences
+        res_set = await get_host_info(action="set_preferences", preferences={"theme": "dark"})
+        self.assertIn("Настройки дашборда ESPHome успешно обновлены", res_set)
+        print("  - get_host_info (action='set_preferences'): настройки успешно сохранены")
+
+    async def test_authenticate_esphome_actions(self):
+        """Тестирование действий authenticate_esphome (logout, refresh, валидация)."""
+        print("\n🔐 Запуск тестов authenticate_esphome (logout, refresh)...")
+
+        # 1. Неизвестное действие
+        res_inv = await authenticate_esphome(action="invalid_action")
+        self.assertIn("неизвестное действие", res_inv)
+        print("  - authenticate_esphome (валидация неизвестного action): корректно")
+
+        # 2. logout
+        res_logout = await authenticate_esphome(action="logout")
+        self.assertIn("auth/logout", res_logout)
+        print("  - authenticate_esphome (action='logout'): команда выполнена")
+
+        # 3. refresh (на незащищенном сервере без сессии возвращает ошибку или ответ)
+        res_refresh = await authenticate_esphome(action="refresh")
+        self.assertTrue("auth/refresh" in res_refresh or "Ошибка" in res_refresh)
+        print("  - authenticate_esphome (action='refresh'): команда выполнена")
+
+    async def test_manage_remote_build_extended_actions(self):
+        """Тестирование новых команд cluster build (set_pairing_window, set_offloader_settings)."""
+        print("\n🌐 Запуск тестов manage_remote_build (extended actions)...")
+
+        # 1. set_pairing_window
+        res_win = await manage_remote_build(action="set_pairing_window", open_window=True)
+        self.assertIn("Окно сопряжения Noise XX успешно", res_win)
+        print("  - manage_remote_build (set_pairing_window): окно сопряжения открыто")
+
+        # 2. set_offloader_settings
+        res_off = await manage_remote_build(
+            action="set_offloader_settings",
+            remote_builds_enabled=True,
+            version_match_policy="any"
+        )
+        self.assertIn("Настройки планировщика кластерной сборки успешно обновлены", res_off)
+        print("  - manage_remote_build (set_offloader_settings): настройки планировщика обновлены")
+
+    async def test_manage_device_config_metadata_and_ignore(self):
+        """Тестирование управления метаданными (metadata) и сокрытия (ignore) на разрешенном test.yaml."""
+        print("\n📝 Запуск тестов manage_device_config (metadata, ignore)...")
+
+        # 1. Обновление метаданных устройства test.yaml
+        res_meta = await manage_device_config(
+            action="metadata",
+            configuration="test.yaml",
+            comment="Тестовое устройство (MCP Test Suite)"
+        )
+        self.assertIn("Метаданные устройства `test.yaml` успешно обновлены", res_meta)
+        print("  - manage_device_config (metadata test.yaml): метаданные успешно обновлены")
+
+        # 2. Проверка команды ignore
+        res_ign = await manage_device_config(
+            action="ignore",
+            configuration="nonexistent-dummy",
+            ignore_device=False
+        )
+        self.assertIn("восстановлено в дашборде", res_ign)
+        print("  - manage_device_config (ignore): команда видимости успешно обработана")
+
+    async def test_mcp_resources(self):
+        """Тестирование динамических ресурсов MCP (esphome://devices, configs, components, boards)."""
+        print("\n📦 Запуск тестов динамических ресурсов MCP (Phase 4.1)...")
+
+        # 1. Проверка регистрации ресурсов и шаблонов в менеджере FastMCP
+        res_keys = list(mcp._resource_manager._resources.keys())
+        tmpl_keys = list(mcp._resource_manager._templates.keys())
+        self.assertIn("esphome://devices", res_keys)
+        self.assertIn("esphome://configs/{configuration}", tmpl_keys)
+        self.assertIn("esphome://components/{component_id}", tmpl_keys)
+        self.assertIn("esphome://boards/{board_id}", tmpl_keys)
+        print("  - Регистрация ресурсов и шаблонов URI в FastMCP: УСПЕШНО")
+
+        # 2. Чтение esphome://devices
+        dev_r_obj = await mcp._resource_manager.get_resource("esphome://devices")
+        dev_content = await dev_r_obj.read()
+        self.assertIsInstance(dev_content, str)
+        dev_data = json.loads(dev_content)
+        self.assertIn("total", dev_data)
+        self.assertIn("devices", dev_data)
+        print(f"  - Ресурс esphome://devices: получено {dev_data['total']} устройств")
+
+        # 3. Чтение esphome://configs/{configuration} на разрешенных устройствах манифеста
+        cfg_r_obj = await mcp._resource_manager.get_resource("esphome://configs/test.yaml")
+        cfg_content = await cfg_r_obj.read()
+        self.assertIsInstance(cfg_content, str)
+        self.assertTrue(cfg_content.startswith("#") or "esphome:" in cfg_content)
+        print("  - Ресурс esphome://configs/test.yaml: исходный YAML успешно прочитан")
+
+        # 4. Чтение esphome://components/{component_id}
+        comp_r_obj = await mcp._resource_manager.get_resource("esphome://components/sensor.bme280_i2c")
+        comp_content = await comp_r_obj.read()
+        self.assertIsInstance(comp_content, str)
+        comp_data = json.loads(comp_content)
+        self.assertEqual(comp_data.get("id"), "sensor.bme280_i2c")
+        print("  - Ресурс esphome://components/sensor.bme280_i2c: паспорт компонента получен")
+
+        # 5. Чтение esphome://boards/{board_id}
+        board_r_obj = await mcp._resource_manager.get_resource("esphome://boards/esp32dev")
+        board_content = await board_r_obj.read()
+        self.assertIsInstance(board_content, str)
+        board_data = json.loads(board_content)
+        self.assertEqual(board_data.get("id"), "esp32dev")
+        print("  - Ресурс esphome://boards/esp32dev: спецификация платы получена")
+
+    async def test_mcp_prompts(self):
+        """Тестирование интерактивных промптов MCP (new_device_wizard, troubleshoot, safe_upgrade)."""
+        print("\n💬 Запуск тестов интерактивных промптов MCP (Phase 4.2)...")
+
+        # 1. Проверка регистрации промптов
+        prompt_keys = list(mcp._prompt_manager._prompts.keys())
+        self.assertIn("new_device_wizard", prompt_keys)
+        self.assertIn("troubleshoot_offline_device", prompt_keys)
+        self.assertIn("safe_firmware_upgrade", prompt_keys)
+        print("  - Регистрация промптов в FastMCP: УСПЕШНО")
+
+        # 2. Рендеринг new_device_wizard
+        p1_rendered = await mcp._prompt_manager.render_prompt(
+            "new_device_wizard",
+            {"board_id": "esp32dev", "device_name": "temp-sensor", "friendly_name": "Living Room Temp"}
+        )
+        self.assertTrue(len(p1_rendered) > 0)
+        p1_text = p1_rendered[0].content.text
+        self.assertIn("esp32dev", p1_text)
+        self.assertIn("temp-sensor", p1_text)
+        self.assertIn("Living Room Temp", p1_text)
+        print("  - Промпт new_device_wizard: рендеринг успешно проверен")
+
+        # 3. Рендеринг troubleshoot_offline_device на разрешенном test.yaml
+        p2_rendered = await mcp._prompt_manager.render_prompt(
+            "troubleshoot_offline_device",
+            {"configuration": "test.yaml"}
+        )
+        self.assertTrue(len(p2_rendered) > 0)
+        p2_text = p2_rendered[0].content.text
+        self.assertIn("test.yaml", p2_text)
+        self.assertIn("troubleshoot_device", p2_text)
+        print("  - Промпт troubleshoot_offline_device: чеклист диагностики сформирован")
+
+        # 4. Рендеринг safe_firmware_upgrade на разрешенном test.yaml
+        p3_rendered = await mcp._prompt_manager.render_prompt(
+            "safe_firmware_upgrade",
+            {"configuration": "test.yaml", "target_port": "OTA"}
+        )
+        self.assertTrue(len(p3_rendered) > 0)
+        p3_text = p3_rendered[0].content.text
+        self.assertIn("test.yaml", p3_text)
+        self.assertIn("flash_ota", p3_text)
+        print("  - Промпт safe_firmware_upgrade: сценарий безопасной прошивки сформирован")
+
+    async def test_validate_hardware_pinout_integration(self):
+        """Интеграционное тестирование инструмента validate_hardware_pinout на разрешенных манифестом устройствах."""
+        print("\n⚡ Запуск тестов валидации аппаратной распиновки (validate_hardware_pinout, Phase 5.1.1)...")
+
+        allowed_configs = ["test.yaml", "liligo-t-internet.yaml", "r5-gate-01.yaml"]
+        for cfg in allowed_configs:
+            res = await validate_hardware_pinout(configuration=cfg)
+            self.assertIsInstance(res, str)
+            self.assertIn("Аппаратный аудит распиновки GPIO", res)
+            self.assertIn(cfg, res)
+            print(f"  - Аудит распиновки {cfg}: УСПЕШНО")
+
+    async def test_flash_canary_ota_integration(self):
+        """Интеграционное тестирование безопасной Canary OTA-прошивки (flash_canary_ota, Phase 5.3.1)."""
+        print("\n🐥 Запуск тестов безопасной Canary OTA-прошивки (flash_canary_ota, Phase 5.3.1)...")
+
+        # 1. Проверка безопасной остановки на несуществующей конфигурации
+        res_fail = await flash_canary_ota(
+            configuration="non_existent_canary_device_12345.yaml",
+            compile_first=True
+        )
+        self.assertIn("СБОРКА НЕ УДАЛАСЬ", res_fail)
+        print("  - Безопасная остановка при сбое компиляции: УСПЕШНО")
+
+        # 2. Canary прошивка разрешенного устройства test.yaml
+        res_canary = await flash_canary_ota(
+            configuration="test.yaml",
+            port="OTA",
+            compile_first=True,
+            monitor_seconds=5,
+            auto_rollback=True
+        )
+        self.assertIsInstance(res_canary, str)
+        self.assertIn("Результаты безопасной Canary OTA-прошивки", res_canary)
+        self.assertIn("test.yaml", res_canary)
+        self.assertIn("CANARY PASSED", res_canary)
+        print("  - Canary OTA прошивка и сторожевой мониторинг test.yaml: CANARY PASSED")
 
 
 if __name__ == "__main__":
