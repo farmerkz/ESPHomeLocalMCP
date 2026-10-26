@@ -280,10 +280,11 @@ gemini mcp add esphome-local -- /ПОЛНЫЙ/ПУТЬ/К/ESPHomeLocalMCP/.venv/
 
 ## 🤖 Инструкции для AI-агентов и интеграция в проекты
 
-Для эффективной работы AI-ассистентов (Cursor, Antigravity, VS Code Copilot, Claude Desktop, Windsurf, Aider) в проектах разработки и управления устройствами ESPHome подготовлены специализированные руководства:
+Для эффективной работы AI-ассистентов (Cursor, Antigravity, VS Code Copilot, Claude Desktop, Windsurf, Aider) в самом репозитории сервера и в пользовательских проектах ESPHome подготовлены специализированные руководства:
 
-- [**`docs/ESPHOME_AGENT_GUIDE.md`**](docs/ESPHOME_AGENT_GUIDE.md) — **Инструкция для AI-агентов**: Золотые правила разработки, 7 типовых сценариев (создание с нуля, AST-автоматизации, сборка, расшифровка сбоев, работа с секретами) и полный справочник 29 инструментов.
-- [**`docs/USER_INTEGRATION_GUIDE.md`**](docs/USER_INTEGRATION_GUIDE.md) — **Руководство пользователя по интеграции**: Пошаговые примеры подключения файла инструкций к проектам для различных AI IDE (`.agents/rules/`, `.cursorrules`, `.cursor/rules/*.mdc`, `.github/copilot-instructions.md`, `CLAUDE.md`, `.windsurfrules`).
+- [**`AGENTS.md`**](AGENTS.md) — **Главные инструкции для AI-агентов в этом репозитории**: архитектура MCP-сервера, правила работы со `stdio`/`sys.stderr`, контракты WebSocket API и пайплайн релизов.
+- [**`docs/ESPHOME_AGENT_GUIDE.md`**](docs/ESPHOME_AGENT_GUIDE.md) — **Инструкция для AI-агентов по работе с устройствами ESPHome**: Золотые правила разработки, 7 типовых сценариев (создание с нуля, AST-автоматизации, сборка, расшифровка сбоев, работа с секретами) и полный справочник 29 инструментов.
+- [**`docs/USER_INTEGRATION_GUIDE.md`**](docs/USER_INTEGRATION_GUIDE.md) — **Руководство пользователя по интеграции**: Пошаговые примеры подключения файла инструкций к проектам для различных AI IDE (`AGENTS.md`, `.agents/rules/`, `.cursorrules`, `.cursor/rules/*.mdc`, `.github/copilot-instructions.md`, `CLAUDE.md`, `.windsurfrules`).
 
 ## 🗺 Дорожная карта развития (Roadmap)
 

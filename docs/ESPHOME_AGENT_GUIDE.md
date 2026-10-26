@@ -193,8 +193,8 @@
 2. **Пакетная прошивка группы устройств (с поддержкой отложенного обновления для оффлайн-узлов):**
    ```python
    batch_compile_and_flash(
-       configurations="node-01.yaml, node-02.yaml, node-03.yaml",
-       action="flash",
+       configurations=["node-01.yaml", "node-02.yaml", "node-03.yaml"],
+       action="install",
        port="OTA"
    )
    ```
@@ -274,8 +274,8 @@
    # Массовое назначение меток на группу устройств
    batch_manage_devices(
        action="set_labels",
-       configurations="light-1.yaml, light-2.yaml",
-       label_ids="<label_id_1>, <label_id_2>"
+       configurations=["light-1.yaml", "light-2.yaml"],
+       label_ids=["<label_id_1>", "<label_id_2>"]
    )
    # Мягкая архивация устаревших устройств
    archive_devices(action="archive", configuration="old-sensor.yaml")
