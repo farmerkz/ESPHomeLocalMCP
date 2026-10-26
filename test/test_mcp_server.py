@@ -36,6 +36,9 @@ from server import (
     validate_hardware_pinout,
     flash_canary_ota,
     analyze_canary_health,
+    is_serial_port,
+    evaluate_signed_ota_safety,
+    extract_yaml_component_ids,
     get_server_version,
     resource_devices,
     resource_device_config,
@@ -676,6 +679,114 @@ binary_sensor:
         h_safe = analyze_canary_health(safemode_logs)
         self.assertFalse(h_safe["is_healthy"])
         self.assertTrue(h_safe["in_safe_mode"])
+
+    def test_edit_friendly_name_and_rename_validation_unit(self):
+        """Модульный тест валидации аргументов edit_friendly_name и rename в manage_device_config."""
+        loop = asyncio.new_event_loop()
+        try:
+            res_no_friendly = loop.run_until_complete(
+                manage_device_config(action="edit_friendly_name", configuration="test.yaml")
+            )
+            self.assertIn("необходимо указать параметр new_friendly_name", res_no_friendly)
+
+            res_no_rename = loop.run_until_complete(
+                manage_device_config(action="rename", configuration="test.yaml", new_name="")
+            )
+            self.assertIn("необходимо указать параметр new_name", res_no_rename)
+        finally:
+            loop.close()
+
+    def test_signed_ota_safety_unit(self):
+        """Модульный тест проверки безопасности Signed OTA (is_serial_port и evaluate_signed_ota_safety)."""
+        self.assertFalse(is_serial_port("OTA"))
+        self.assertFalse(is_serial_port("192.168.1.105"))
+        self.assertFalse(is_serial_port("test.local"))
+        self.assertTrue(is_serial_port("/dev/ttyUSB0"))
+        self.assertTrue(is_serial_port("/dev/cu.usbserial-1410"))
+        self.assertTrue(is_serial_port("COM3"))
+
+        dev_conflict = {
+            "configuration": "test.yaml",
+            "name": "test",
+            "ota_signing_key": False,
+            "runtime_state": {"ota_signed": True}
+        }
+        # 1. Блокировка при прошивке по OTA без ключа подписи
+        ok_ota, msg_ota = evaluate_signed_ota_safety(dev_conflict, "OTA")
+        self.assertFalse(ok_ota)
+        self.assertIn("Отказ безопасности Signed OTA", msg_ota)
+        self.assertIn("signing_key", msg_ota)
+
+        # 2. Блокировка при прошивке по IP без ключа подписи
+        ok_ip, _ = evaluate_signed_ota_safety(dev_conflict, "192.168.1.50")
+        self.assertFalse(ok_ip)
+
+        # 3. Разрешение прошивки через проводной порт USB/Serial
+        ok_ser, msg_ser = evaluate_signed_ota_safety(dev_conflict, "/dev/ttyUSB0")
+        self.assertTrue(ok_ser)
+        self.assertEqual(msg_ser, "OK")
+
+        # 4. Разрешение при наличии ключа подписи в YAML
+        dev_signed_ok = {
+            "configuration": "test.yaml",
+            "ota_signing_key": True,
+            "runtime_state": {"ota_signed": True}
+        }
+        ok_both, _ = evaluate_signed_ota_safety(dev_signed_ok, "OTA")
+        self.assertTrue(ok_both)
+
+        # 5. Разрешение для обычных неподписанных устройств
+        dev_unsigned = {
+            "configuration": "test.yaml",
+            "ota_signing_key": False,
+            "runtime_state": {"ota_signed": False}
+        }
+        ok_unsigned, _ = evaluate_signed_ota_safety(dev_unsigned, "OTA")
+        self.assertTrue(ok_unsigned)
+
+    def test_device_components_extraction_and_validation_unit(self):
+        """Модульный тест извлечения компонентов устройства (extract_yaml_component_ids и валидация device_components)."""
+        loop = asyncio.new_event_loop()
+        try:
+            res_no_cfg = loop.run_until_complete(
+                search_components(action="device_components", configuration="")
+            )
+            self.assertIn("необходимо указать параметр 'configuration'", res_no_cfg)
+        finally:
+            loop.close()
+
+        sample_yaml = """
+esphome:
+  name: test-node
+substitutions:
+  dev_name: test
+esp32:
+  board: esp32dev
+wifi:
+  ssid: !secret wifi_ssid
+api:
+ota:
+  - platform: esphome
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+sensor:
+  - platform: bme280_i2c
+  - platform: uptime
+switch:
+  - platform: gpio
+"""
+        extracted = extract_yaml_component_ids(sample_yaml)
+        self.assertNotIn("esphome", extracted)
+        self.assertNotIn("substitutions", extracted)
+        self.assertIn("esp32", extracted)
+        self.assertIn("wifi", extracted)
+        self.assertIn("api", extracted)
+        self.assertIn("ota.esphome", extracted)
+        self.assertIn("i2c", extracted)
+        self.assertIn("sensor.bme280_i2c", extracted)
+        self.assertIn("sensor.uptime", extracted)
+        self.assertIn("switch.gpio", extracted)
 
 
 class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
@@ -1658,6 +1769,34 @@ class TestMCPServerIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("test.yaml", res_canary)
         self.assertIn("CANARY PASSED", res_canary)
         print("  - Canary OTA прошивка и сторожевой мониторинг test.yaml: CANARY PASSED")
+
+    async def test_search_device_components_integration(self):
+        """Интеграционное тестирование search_components(action='device_components') на разрешенных устройствах."""
+        print("\n🧩 Запуск тестов извлечения компонентов устройства (search_components, action='device_components')...")
+        res = await search_components(action="device_components", configuration="test.yaml")
+        self.assertIsInstance(res, str)
+        self.assertIn("Компоненты устройства `test.yaml`", res)
+        print("  - Извлечение компонентов test.yaml: УСПЕШНО")
+
+    async def test_edit_friendly_name_integration(self):
+        """Интеграционное тестирование manage_device_config(action='edit_friendly_name') на разрешенном test.yaml."""
+        print("\n✏️ Запуск тестов точечного обновления friendly_name в YAML (edit_friendly_name)...")
+        orig_res = await manage_device_config(action="get", configuration="test.yaml")
+        m_yaml = re.search(r"```yaml\n(.*?)\n```", orig_res, re.DOTALL)
+        orig_yaml = m_yaml.group(1) if m_yaml else ""
+
+        try:
+            edit_res = await manage_device_config(
+                action="edit_friendly_name",
+                configuration="test.yaml",
+                new_friendly_name="Test Node Updated"
+            )
+            self.assertIsInstance(edit_res, str)
+            self.assertTrue("Отображаемое имя" in edit_res or "edit_friendly_name" in edit_res)
+            print("  - Точечное обновление esphome.friendly_name в test.yaml: УСПЕШНО")
+        finally:
+            if orig_yaml:
+                await manage_device_config(action="update", configuration="test.yaml", content=orig_yaml)
 
 
 if __name__ == "__main__":

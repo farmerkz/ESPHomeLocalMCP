@@ -347,6 +347,105 @@ async def compile_firmware(
         args["force_local"] = True
     return await execute_ws_command(host, "firmware/compile", args, port=port)
 
+def is_serial_port(port_str: str) -> bool:
+    """
+    Определяет, является ли целевой порт физическим последовательным интерфейсом (USB/Serial: /dev/tty*, /dev/cu*, COM*),
+    а не сетевым OTA-каналом ("OTA", IP-адрес или mDNS hostname).
+    """
+    p = (port_str or "OTA").strip()
+    if not p or p.upper() == "OTA":
+        return False
+    return p.startswith("/dev/") or bool(re.match(r"^COM\d+$", p, re.IGNORECASE))
+
+
+def evaluate_signed_ota_safety(device_info: dict, target_port: str = "OTA") -> tuple[bool, str]:
+    """
+    Проверяет безопасность прошивки устройства с активной верификацией цифровой подписи OTA (Signed OTA).
+    Если микроконтроллер вещает в mDNS флаг ota_signed=True, но в YAML-конфигурации отсутствует
+    ключ подписи (ota_signing_key=False), попытка прошивки по воздуху (OTA) приведет к отказу
+    загрузчика или потере связи. В этом случае требуется либо добавить signing_key, либо прошить по Serial.
+    """
+    if not isinstance(device_info, dict):
+        return True, "OK"
+
+    if is_serial_port(target_port):
+        return True, "OK"
+
+    runtime = device_info.get("runtime_state", {}) or {}
+    ota_signed = bool(runtime.get("ota_signed", device_info.get("ota_signed", False)))
+    ota_signing_key = bool(device_info.get("ota_signing_key", False))
+
+    if ota_signed and not ota_signing_key:
+        cfg_name = device_info.get("configuration", device_info.get("name", "unknown.yaml"))
+        return (
+            False,
+            f"⛔ **Отказ безопасности Signed OTA (`{cfg_name}`):**\n"
+            f"На работающем микроконтроллере активирована аппаратная проверка цифровой подписи прошивки "
+            f"(`runtime_state.ota_signed = True`), однако в текущей YAML-конфигурации не задан ключ подписи "
+            f"(`ota_signing_key = False`).\n\n"
+            f"Загрузка неподписанного образа по воздуху (`port={target_port!r}`) будет отклонена устройством.\n"
+            f"**Рекомендации:**\n"
+            f"1. Добавьте блок `signing_key` в секцию `esp32 -> framework -> advanced -> signed_ota_verification`.\n"
+            f"2. Или выполните прошивку через проводное подключение USB/Serial (например, `port=\"/dev/ttyUSB0\"`)."
+        )
+
+    return True, "OK"
+
+
+async def _check_signed_ota_precondition(
+    host: str,
+    port: int,
+    configuration: str,
+    target_port: str = "OTA"
+) -> str | None:
+    """
+    Выполняет предварительный опрос реестра устройств (devices/list) перед сетевой OTA-прошивкой.
+    Возвращает текст ошибки блокировки, если обнаружен конфликт Signed OTA, иначе None.
+    При недоступности сервера возвращает None, передавая управление основному обработчику команды.
+    """
+    if is_serial_port(target_port):
+        return None
+
+    url = get_ws_url(host, port)
+    msg_id = f"signed_ota_check_{uuid.uuid4().hex[:8]}"
+    try:
+        async with websockets.connect(url, ping_interval=None) as ws:
+            first_msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
+            if first_msg.get("requires_auth"):
+                return None
+
+            await ws.send(json.dumps({
+                "command": "devices/list",
+                "message_id": msg_id,
+                "args": {}
+            }))
+
+            data = json.loads(await asyncio.wait_for(ws.recv(), timeout=3.0))
+            if data.get("error_code"):
+                return None
+
+            result = data.get("result", {})
+            devices = []
+            if isinstance(result, dict):
+                devices = (result.get("configured", []) or []) + (result.get("importable", []) or [])
+            elif isinstance(result, list):
+                devices = result
+
+            base_name = configuration.removesuffix(".yaml")
+            for dev in devices:
+                if not isinstance(dev, dict):
+                    continue
+                if dev.get("configuration") == configuration or dev.get("name") == base_name:
+                    is_safe, err_msg = evaluate_signed_ota_safety(dev, target_port)
+                    if not is_safe:
+                        return err_msg
+                    break
+    except Exception:
+        return None
+
+    return None
+
+
 @mcp.tool()
 async def flash_ota(
     configuration: str,
@@ -357,6 +456,7 @@ async def flash_ota(
 ) -> str:
     """
     Инструмент 3: Прошивка готового скомпилированного бинарника (OTA / Serial / IP).
+    Включает автоматическую проверку безопасности цифровой подписи (Signed OTA Verification).
     
     Параметры:
       - configuration: имя файла ("mcp-test.yaml") или относительный путь ("config/mcp-test.yaml")
@@ -368,6 +468,11 @@ async def flash_ota(
     """
     config_name = resolve_configuration(configuration)
     target_port = "OTA" if not port else str(port)
+
+    ota_err = await _check_signed_ota_precondition(host, api_port, config_name, target_port)
+    if ota_err:
+        return ota_err
+
     args: dict = {"configuration": config_name, "port": target_port}
     if bootloader:
         args["bootloader"] = True
@@ -384,6 +489,7 @@ async def compile_and_flash(
 ) -> str:
     """
     Инструмент 4: Полный цикл сборки и прошивки (Компиляция + Загрузка по OTA / Serial / IP).
+    Включает предварительную проверку безопасности цифровой подписи (Signed OTA Verification).
     
     Параметры:
       - configuration: имя файла ("mcp-test.yaml") или относительный путь ("config/mcp-test.yaml")
@@ -396,6 +502,11 @@ async def compile_and_flash(
     """
     config_name = resolve_configuration(configuration)
     target_port = "OTA" if not port else str(port)
+
+    ota_err = await _check_signed_ota_precondition(host, api_port, config_name, target_port)
+    if ota_err:
+        return ota_err
+
     args: dict = {"configuration": config_name, "port": target_port}
     if force_local:
         args["force_local"] = True
@@ -471,7 +582,13 @@ async def list_devices(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> st
                     
                     labels = dev.get("labels", [])
                     labels_str = ", ".join(labels) if labels else "нет"
-                    
+
+                    ota_signed = bool(runtime.get("ota_signed", dev.get("ota_signed", False)))
+                    ota_signing_key = bool(dev.get("ota_signing_key", False))
+                    extra_lines = ""
+                    if ota_signed or ota_signing_key:
+                        extra_lines = f"\n  - Цифровая подпись OTA (Signed OTA): устройство={'Да' if ota_signed else 'Нет'}, ключ в конфиге={'Да' if ota_signing_key else 'Нет'}"
+
                     output.append(
                         f"- **{friendly}** (`{config}`):\n"
                         f"  - Имя/Hostname: `{name}`\n"
@@ -479,7 +596,7 @@ async def list_devices(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> st
                         f"  - Версия прошивки: {deployed_ver}\n"
                         f"  - Изменения не прошиты: {pending_str}\n"
                         f"  - Обновление ESPHome: {update_str}\n"
-                        f"  - Метки: {labels_str}"
+                        f"  - Метки: {labels_str}{extra_lines}"
                     )
                 return "\n".join(output)
                 
@@ -719,6 +836,7 @@ async def manage_device_config(
     configuration: str,
     content: str = "",
     new_name: str = "",
+    new_friendly_name: str = "",
     board_id: str = "",
     friendly_name: str = "",
     comment: str = "",
@@ -741,65 +859,68 @@ async def manage_device_config(
     Инструмент 9 (P1/P2): Управление конфигурацией устройств ESPHome через API.
 
     Параметр action поддерживает следующие действия:
-      - "get"           — прочитать содержимое YAML-конфигурации устройства
-      - "update"        — записать новое содержимое YAML-конфигурации (требует content, опционально expected для CAS)
-      - "create"        — создать новую конфигурацию устройства:
-                          - по готовому YAML (параметр content)
-                          - или по шаблону платы (параметр board_id, опционально friendly_name, ssid, psk)
-      - "rename"        — переименовать конфигурацию (требует new_name):
-                          - config_only=True (по умолчанию) — офлайн переименование файлов на диске
-                          - config_only=False — онлайн двухшаговый процесс (сборка -> OTA-прошивка -> переименование)
-      - "delete"        — удалить конфигурацию и связанные файлы
-      - "key"           — получить единый ключ шифрования Native API / OTA для устройства (devices/get_encryption_key)
-      - "add_component" — прямое добавление компонента в конфигурацию устройства (devices/add_component):
-                          - apply=False (по умолчанию) — режим предпросмотра (dry-run) без сохранения на диск
-                          - apply=True — атомарное добавление и сохранение в файл на диске
-      - "metadata"      — обновление метаданных sidecar JSON устройства без изменения YAML (devices/update):
-                          поддерживает friendly_name, comment, board_id
-      - "import"        — импорт/принятие обнаруженного устройства в реестр ESPHome (devices/import)
-      - "ignore"        — скрытие или восстановление видимости устройства в дашборде (devices/ignore)
+      - "get"                — прочитать содержимое YAML-конфигурации устройства
+      - "update"             — записать новое содержимое YAML-конфигурации (требует content, опционально expected для CAS)
+      - "create"             — создать новую конфигурацию устройства:
+                                - по готовому YAML (параметр content)
+                                - или по шаблону платы (параметр board_id, опционально friendly_name, ssid, psk)
+      - "rename"             — переименовать конфигурацию (требует new_name, опционально new_friendly_name / friendly_name):
+                                - config_only=True (по умолчанию) — офлайн переименование файлов на диске
+                                - config_only=False — онлайн двухшаговый процесс (сборка -> OTA-прошивка -> переименование)
+      - "edit_friendly_name" — точечная перезапись esphome.friendly_name прямо в YAML-файле без запуска сборки (devices/edit_friendly_name)
+      - "delete"             — удалить конфигурацию и связанные файлы
+      - "key"                — получить единый ключ шифрования Native API / OTA для устройства (devices/get_encryption_key)
+      - "add_component"      — прямое добавление компонента в конфигурацию устройства (devices/add_component):
+                                - apply=False (по умолчанию) — режим предпросмотра (dry-run) без сохранения на диск
+                                - apply=True — атомарное добавление и сохранение в файл на диске
+      - "metadata"           — обновление метаданных sidecar JSON устройства без изменения YAML (devices/update):
+                                поддерживает friendly_name, comment, board_id
+      - "import"             — импорт/принятие обнаруженного устройства в реестр ESPHome (devices/import)
+      - "ignore"             — скрытие или восстановление видимости устройства в дашборде (devices/ignore)
 
     Параметры:
-      - configuration:  имя файла ("test.yaml") или относительный путь ("config/test.yaml")
-      - content:        содержимое YAML для действий "update" или "create"
-      - new_name:       новое имя для действия "rename"
-      - board_id:       ID платы для создания по шаблону (например "esp32dev", "d1_mini", "nodemcuv2") или для "metadata"
-      - friendly_name:  понятное имя устройства (например "Датчик климата")
-      - comment:        пользовательский комментарий/заметка к устройству для действия "metadata"
-      - ssid:           имя Wi-Fi сети (сохраняется в secrets.yaml с использованием !secret)
-      - psk:            пароль Wi-Fi сети
-      - config_only:    переименование только файлов конфигурации (True) или с онлайн OTA-прошивкой (False)
-      - overwrite:      перезаписывать ли существующий файл при создании
-      - allow_wipe:     разрешить перезапись при действии "update"
-      - expected:       ожидаемое текущее содержимое файла (Compare-and-Swap защита при действии "update")
-      - component_id:   идентификатор компонента для "add_component" (например "sensor.bme280_i2c", "wifi")
-      - fields:         словарь полей компонента для "add_component"
-      - sub_entities:   вложенные сущности компонента для "add_component"
-      - apply:          применить ли добавление компонента на диск (для "add_component")
-      - project_name:   имя проекта для действия "import"
-      - ignore_device:  флаг скрытия устройства (True — скрыть, False — восстановить видимость) для действия "ignore"
-      - host:           хост сервера ESPHome
-      - port:           сетевой порт WebSocket API ESPHome
+      - configuration:      имя файла ("test.yaml") или относительный путь ("config/test.yaml")
+      - content:            содержимое YAML для действий "update" или "create"
+      - new_name:           новое имя для действия "rename"
+      - new_friendly_name:  новое отображаемое имя для действий "edit_friendly_name" и "rename"
+      - board_id:           ID платы для создания по шаблону (например "esp32dev", "d1_mini", "nodemcuv2") или для "metadata"
+      - friendly_name:      понятное имя устройства (например "Датчик климата")
+      - comment:            пользовательский комментарий/заметка к устройству для действия "metadata"
+      - ssid:               имя Wi-Fi сети (сохраняется в secrets.yaml с использованием !secret)
+      - psk:                пароль Wi-Fi сети
+      - config_only:        переименование только файлов конфигурации (True) или с онлайн OTA-прошивкой (False)
+      - overwrite:          перезаписывать ли существующий файл при создании
+      - allow_wipe:         разрешить перезапись при действии "update"
+      - expected:           ожидаемое текущее содержимое файла (Compare-and-Swap защита при действии "update")
+      - component_id:       идентификатор компонента для "add_component" (например "sensor.bme280_i2c", "wifi")
+      - fields:             словарь полей компонента для "add_component"
+      - sub_entities:       вложенные сущности компонента для "add_component"
+      - apply:              применить ли добавление компонента на диск (для "add_component")
+      - project_name:       имя проекта для действия "import"
+      - ignore_device:      флаг скрытия устройства (True — скрыть, False — восстановить видимость) для действия "ignore"
+      - host:               хост сервера ESPHome
+      - port:               сетевой порт WebSocket API ESPHome
     """
     url = get_ws_url(host, port)
     msg_id = "manage_cfg_1"
 
     command_map = {
-        "get":           "devices/get_config",
-        "update":        "devices/update_config",
-        "create":        "devices/create",
-        "rename":        "devices/rename",
-        "delete":        "devices/delete",
-        "key":           "devices/get_encryption_key",
-        "add_component": "devices/add_component",
-        "metadata":      "devices/update",
-        "import":        "devices/import",
-        "ignore":        "devices/ignore",
+        "get":                "devices/get_config",
+        "update":             "devices/update_config",
+        "create":             "devices/create",
+        "rename":             "devices/rename",
+        "edit_friendly_name": "devices/edit_friendly_name",
+        "delete":             "devices/delete",
+        "key":                "devices/get_encryption_key",
+        "add_component":      "devices/add_component",
+        "metadata":           "devices/update",
+        "import":             "devices/import",
+        "ignore":             "devices/ignore",
     }
 
     action = action.strip().lower()
     if action not in command_map:
-        return f"Ошибка: неизвестное действие '{action}'. Допустимые: get, update, create, rename, delete, key, add_component, metadata, import, ignore."
+        return f"Ошибка: неизвестное действие '{action}'. Допустимые: get, update, create, rename, edit_friendly_name, delete, key, add_component, metadata, import, ignore."
 
     command = command_map[action]
     config_name = resolve_configuration(configuration)
@@ -839,6 +960,17 @@ async def manage_device_config(
             "configuration": config_name,
             "new_name": new_name_clean,
             "config_only": config_only
+        }
+        target_friendly = (new_friendly_name or friendly_name).strip()
+        if target_friendly:
+            args["new_friendly_name"] = target_friendly
+    elif action == "edit_friendly_name":
+        target_friendly = (new_friendly_name or friendly_name).strip()
+        if not target_friendly:
+            return "Ошибка: для действия 'edit_friendly_name' необходимо указать параметр new_friendly_name (или friendly_name)."
+        args = {
+            "configuration": config_name,
+            "new_friendly_name": target_friendly
         }
     elif action == "delete":
         args = {"configuration": config_name}
@@ -944,7 +1076,12 @@ async def manage_device_config(
 
                 elif action == "rename":
                     # Проверяем, запущена ли двухшаговая задача прошивки (при config_only=False)
-                    job_id = (result or {}).get("job_id") if isinstance(result, dict) else None
+                    job_obj = (result or {}).get("job") if isinstance(result, dict) else None
+                    job_id = (
+                        (result or {}).get("job_id")
+                        or (job_obj.get("job_id") if isinstance(job_obj, dict) else job_obj)
+                    ) if isinstance(result, dict) else None
+                    friendly_note = f" (friendly_name: `{args['new_friendly_name']}`)" if args.get("new_friendly_name") else ""
                     if job_id and not config_only:
                         logger.info(f"Онлайн-переименование запустило задачу {job_id}, подписываемся на логи...")
                         follow_id = "rename_follow_2"
@@ -973,10 +1110,25 @@ async def manage_device_config(
                                 success = (status_data.get("status") == "completed" or status_data.get("success") is True) if isinstance(status_data, dict) else True
                                 status_text = "УСПЕШНО" if success else "ОШИБКА"
                                 tail_logs = "\n".join(output_log[-35:])
-                                return f"✅ Онлайн-переименование `{config_name}` → `{new_name_clean}.yaml` завершено ({status_text}).\n\nЛог процесса:\n{tail_logs}"
+                                return f"✅ Онлайн-переименование `{config_name}` → `{new_name_clean}.yaml`{friendly_note} завершено ({status_text}).\n\nЛог процесса:\n{tail_logs}"
 
                     new_cfg = (result or {}).get("configuration", f"{new_name_clean}.yaml") if isinstance(result, dict) else f"{new_name_clean}.yaml"
-                    return f"✅ Конфигурация `{config_name}` успешно переименована в `{new_cfg}`."
+                    return f"✅ Конфигурация `{config_name}` успешно переименована в `{new_cfg}`{friendly_note}."
+
+                elif action == "edit_friendly_name":
+                    res_dict = result if isinstance(result, dict) else {}
+                    rewritten = res_dict.get("rewritten", True)
+                    real_cfg = res_dict.get("configuration", config_name)
+                    target_friendly = args.get("new_friendly_name", "")
+                    if not rewritten:
+                        return (
+                            f"ℹ️ Отображаемое имя (`esphome.friendly_name`) в `{real_cfg}` уже установлено в "
+                            f"`{target_friendly}` (rewritten=False). Перезапись и повторная прошивка не требуются."
+                        )
+                    return (
+                        f"✅ Отображаемое имя (`esphome.friendly_name`) в YAML-конфигурации `{real_cfg}` "
+                        f"успешно обновлено на `{target_friendly}` (devices/edit_friendly_name, rewritten=True)."
+                    )
 
                 elif action == "metadata":
                     res_dict = result if isinstance(result, dict) else {}
@@ -1172,6 +1324,52 @@ async def migrate_device_config(
         return error_msg
 
 
+def extract_yaml_component_ids(yaml_text: str) -> list[str]:
+    """
+    Извлекает идентификаторы компонентов ESPHome (корневые домены и пары domain.platform)
+    из текста YAML-конфигурации устройства (аналог сканера Device.component_ids в Device Builder).
+    """
+    if not yaml_text or not isinstance(yaml_text, str):
+        return []
+
+    ignored_roots = {"esphome", "substitutions", "packages", "external_components"}
+    discovered: list[str] = []
+    seen: set[str] = set()
+
+    def _add(cid: str) -> None:
+        c = cid.strip()
+        if c and c not in seen:
+            seen.add(c)
+            discovered.append(c)
+
+    current_domain = ""
+    top_key_re = re.compile(r"^([a-zA-Z0-9_]+)\s*:")
+    platform_re = re.compile(r"^\s+(?:-\s*)?platform\s*:\s*[\"']?([a-zA-Z0-9_]+)[\"']?")
+
+    for raw_line in yaml_text.splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+
+        m_top = top_key_re.match(line)
+        if m_top:
+            key = m_top.group(1).strip()
+            if key in ignored_roots:
+                current_domain = ""
+            else:
+                current_domain = key
+                _add(key)
+            continue
+
+        if current_domain:
+            m_plat = platform_re.match(line)
+            if m_plat:
+                plat = m_plat.group(1).strip()
+                _add(f"{current_domain}.{plat}")
+
+    return discovered
+
+
 @mcp.tool()
 async def search_components(
     action: str = "search",
@@ -1180,6 +1378,7 @@ async def search_components(
     platform: str = "",
     component_id: str = "",
     board_id: str = "",
+    configuration: str = "",
     limit: int = 20,
     offset: int = 0,
     host: str = DEFAULT_HOST,
@@ -1190,35 +1389,42 @@ async def search_components(
 
     Позволяет агенту находить компоненты, датчики, дисплеи и приводы, узнавать их зависимости
     (i2c, spi, uart), ограничения шин, ссылки на документацию, подробную схему настроек
-    (config_entries) и поддерживаемые режимы GPIO.
+    (config_entries), поддерживаемые режимы GPIO, а также получать список всех компонентов,
+    используемых конкретным устройством.
 
     Параметр action поддерживает:
-      - "search"     — поиск компонентов по query, категории, платформе с пагинацией
-      - "get"        — подробный паспорт компонента со схемой параметров (components/get_component_bodies)
-      - "categories" — список всех категорий компонентов ESPHome с количеством записей
-      - "pin_modes"  — справочник поддерживаемых режимов пинов для GPIO-расширителей
+      - "search"            — поиск компонентов по query, категории, платформе с пагинацией
+      - "get"               — подробный паспорт компонента со схемой параметров (components/get_component_bodies)
+      - "categories"        — список всех категорий компонентов ESPHome с количеством записей
+      - "pin_modes"         — справочник поддерживаемых режимов пинов для GPIO-расширителей
+      - "device_components" — список всех компонентов и платформ, используемых в YAML-конфигурации устройства
+                              (аналог get_config_components / Device.component_ids с обогащением из каталога)
 
     Параметры:
-      - query:        строка поиска (название, чип, например "bme280", "dht", "ssd1306")
-      - category:     фильтр по категории (например "sensor", "display", "light", "climate")
-      - platform:     фильтр по платформе чипа (например "esp32", "rp2040")
-      - component_id: точный ID компонента для action="get" (например "sensor.bme280_i2c")
-      - board_id:     ID платы для контекстной фильтрации компонентов (опционально)
-      - limit:        максимальное количество результатов (по умолчанию 20)
-      - offset:       смещение для пагинации (по умолчанию 0)
-      - host:         хост сервера ESPHome
-      - port:         сетевой порт WebSocket API ESPHome
+      - query:         строка поиска (название, чип, например "bme280", "dht", "ssd1306")
+      - category:      фильтр по категории (например "sensor", "display", "light", "climate")
+      - platform:      фильтр по платформе чипа (например "esp32", "rp2040")
+      - component_id:  точный ID компонента для action="get" (например "sensor.bme280_i2c")
+      - board_id:      ID платы для контекстной фильтрации компонентов (опционально)
+      - configuration: имя YAML-файла устройства для action="device_components" (например "test.yaml")
+      - limit:         максимальное количество результатов (по умолчанию 20)
+      - offset:        смещение для пагинации (по умолчанию 0)
+      - host:          хост сервера ESPHome
+      - port:          сетевой порт WebSocket API ESPHome
     """
     url = get_ws_url(host, port)
     msg_id = "comp_tool_1"
     action = action.strip().lower()
 
-    valid_actions = ("search", "get", "categories", "pin_modes")
+    valid_actions = ("search", "get", "categories", "pin_modes", "device_components", "config_components")
     if action not in valid_actions:
         return f"Ошибка: неизвестное действие '{action}'. Допустимые: {', '.join(valid_actions)}."
 
     if action == "get" and not component_id and not query:
         return "Ошибка: для действия 'get' необходимо указать параметр 'component_id' или 'query'."
+
+    if action in ("device_components", "config_components") and not configuration.strip():
+        return "Ошибка: для действия 'device_components' необходимо указать параметр 'configuration' (имя YAML-файла устройства)."
 
     if action == "search":
         command = "components/get_components"
@@ -1253,13 +1459,119 @@ async def search_components(
         command = "components/get_pin_registry_modes"
         args = {}
 
-    logger.info(f"search_components: action={action!r}, query={query!r}, category={category!r}, component_id={component_id!r}")
+    elif action in ("device_components", "config_components"):
+        command = "devices/list"
+        args = {}
+
+    logger.info(f"search_components: action={action!r}, query={query!r}, category={category!r}, component_id={component_id!r}, configuration={configuration!r}")
     try:
         async with websockets.connect(url, ping_interval=None) as ws:
             first_msg_raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
             first_msg = json.loads(first_msg_raw)
             if first_msg.get("requires_auth"):
                 return "Ошибка: ESPHome требует авторизацию, но MCP-сервер пока не поддерживает передачу паролей (requires_auth=true)."
+
+            if action in ("device_components", "config_components"):
+                cfg_name = resolve_configuration(configuration)
+                base_name = cfg_name.removesuffix(".yaml")
+
+                # 1. Запрашиваем devices/list для получения scan data (component_ids, loaded_platforms, loaded_integrations)
+                dev_entry = None
+                await ws.send(json.dumps({
+                    "command": "devices/list",
+                    "message_id": "dev_comp_list_1",
+                    "args": {}
+                }))
+                list_resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+                if not list_resp.get("error_code"):
+                    res_list = list_resp.get("result", {})
+                    dev_rows = res_list.get("configured", res_list.get("devices", [])) if isinstance(res_list, dict) else (res_list if isinstance(res_list, list) else [])
+                    for d in dev_rows:
+                        if isinstance(d, dict) and (d.get("configuration") == cfg_name or d.get("name") == base_name):
+                            dev_entry = d
+                            break
+
+                # 2. Запрашиваем актуальный YAML через devices/get_config для прямого сканирования директив
+                await ws.send(json.dumps({
+                    "command": "devices/get_config",
+                    "message_id": "dev_comp_cfg_1",
+                    "args": {"configuration": cfg_name}
+                }))
+                cfg_resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+                if cfg_resp.get("error_code") and not dev_entry:
+                    return f"Ошибка получения компонентов устройства `{cfg_name}`: {cfg_resp.get('details', cfg_resp)}"
+
+                yaml_raw = cfg_resp.get("result", "") if not cfg_resp.get("error_code") else ""
+                if isinstance(yaml_raw, dict):
+                    yaml_raw = yaml_raw.get("content", "")
+                yaml_ids = extract_yaml_component_ids(str(yaml_raw or ""))
+
+                merged_ids: list[str] = []
+                seen_ids: set[str] = set()
+
+                def _collect(items: list | None) -> None:
+                    for it in (items or []):
+                        if isinstance(it, str) and it.strip() and it.strip() not in seen_ids:
+                            seen_ids.add(it.strip())
+                            merged_ids.append(it.strip())
+
+                if dev_entry:
+                    _collect(dev_entry.get("component_ids"))
+                    _collect(dev_entry.get("loaded_platforms"))
+                    _collect(dev_entry.get("loaded_integrations"))
+                _collect(yaml_ids)
+
+                if not merged_ids:
+                    return f"В конфигурации `{cfg_name}` не обнаружено подключенных компонентов."
+
+                # 3. Обогащаем найденные ID через каталог components/get_component_bodies
+                body_args: dict = {"component_ids": merged_ids}
+                eff_platform = platform or (dev_entry.get("platform", "") if dev_entry else "")
+                eff_board = board_id or (dev_entry.get("board_id", "") if dev_entry else "")
+                if eff_platform:
+                    body_args["platform"] = eff_platform
+                if eff_board:
+                    body_args["board_id"] = eff_board
+
+                catalog_bodies: dict = {}
+                await ws.send(json.dumps({
+                    "command": "components/get_component_bodies",
+                    "message_id": "dev_comp_bodies_1",
+                    "args": body_args
+                }))
+                bodies_resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+                if not bodies_resp.get("error_code") and isinstance(bodies_resp.get("result"), dict):
+                    catalog_bodies = bodies_resp["result"]
+
+                output = [
+                    f"### 🧩 Компоненты устройства `{cfg_name}` (всего: {len(merged_ids)}, в каталоге: {len(catalog_bodies)}):\n"
+                ]
+
+                core_only: list[str] = []
+                for cid in merged_ids:
+                    if cid in catalog_bodies and isinstance(catalog_bodies[cid], dict):
+                        c_info = catalog_bodies[cid]
+                        cname = c_info.get("name", cid)
+                        cat = c_info.get("category", "core")
+                        desc = c_info.get("description", "").strip()
+                        deps = ", ".join(c_info.get("dependencies", []) or [])
+                        deps_str = f" | Зависимости: `{deps}`" if deps else ""
+                        docs = c_info.get("docs_url", "")
+                        docs_str = f" | [Документация]({docs})" if docs else ""
+                        output.append(f"- **{cname}** (`{cid}`) [{cat}]{deps_str}{docs_str}")
+                        if desc:
+                            short_desc = desc[:140] + ("..." if len(desc) > 140 else "")
+                            output.append(f"  *{short_desc}*")
+                    else:
+                        core_only.append(cid)
+
+                if core_only:
+                    output.append(
+                        f"\n**Системные домены и базовые интеграции:** "
+                        + ", ".join(f"`{c}`" for c in core_only)
+                    )
+
+                return "\n".join(output)
 
             await ws.send(json.dumps({
                 "command": command,
@@ -3106,6 +3418,25 @@ async def manage_automations(
         if not trigger.strip():
             return "Ошибка: для действия 'delete' необходимо указать параметр 'trigger' (имя триггера, например 'on_turn_on')."
 
+    refs_list: list = []
+    if action in ("docs", "bodies"):
+        if isinstance(refs, str) and refs.strip():
+            try:
+                parsed_refs = json.loads(refs)
+                refs_list = parsed_refs if isinstance(parsed_refs, list) else [parsed_refs]
+            except json.JSONDecodeError:
+                return "Ошибка: параметр 'refs' должен быть валидным JSON списком объектов [{'type': '...', 'id': '...'}]"
+        elif isinstance(refs, list):
+            refs_list = refs
+        elif isinstance(refs, dict):
+            refs_list = [refs]
+
+        if not refs_list:
+            return (
+                "Ошибка: для действия 'docs' необходимо указать параметр 'refs' "
+                "(список объектов до 50 шт, например [{'type': 'actions', 'id': 'switch.toggle'}])."
+            )
+
     logger.info(f"manage_automations: action={action!r}, configuration={cfg_clean!r}, component_id={component_id!r}, apply={apply}")
 
     try:
@@ -3216,24 +3547,6 @@ async def manage_automations(
                 return "\n".join(output)
 
             elif action in ("docs", "bodies"):
-                refs_list = []
-                if isinstance(refs, str) and refs.strip():
-                    try:
-                        parsed_refs = json.loads(refs)
-                        refs_list = parsed_refs if isinstance(parsed_refs, list) else [parsed_refs]
-                    except json.JSONDecodeError:
-                        return "Ошибка: параметр 'refs' должен быть валидным JSON списком объектов [{'type': '...', 'id': '...'}]"
-                elif isinstance(refs, list):
-                    refs_list = refs
-                elif isinstance(refs, dict):
-                    refs_list = [refs]
-
-                if not refs_list:
-                    return (
-                        "Ошибка: для действия 'docs' необходимо указать параметр 'refs' "
-                        "(список объектов до 50 шт, например [{'type': 'actions', 'id': 'switch.toggle'}])."
-                    )
-
                 body_args = {
                     "refs": refs_list[:50],
                     "include_advanced": include_advanced
@@ -3243,7 +3556,14 @@ async def manage_automations(
                 if data.get("error_code"):
                     return f"Ошибка получения паспортов автоматизаций: {data.get('details', data)}"
 
-                bodies_dict = data.get("result", {}) or {}
+                res_raw = data.get("result", {}) or {}
+                if isinstance(res_raw, dict) and "bodies" in res_raw and isinstance(res_raw["bodies"], dict):
+                    bodies_dict = res_raw["bodies"]
+                elif isinstance(res_raw, dict):
+                    bodies_dict = res_raw
+                else:
+                    bodies_dict = {}
+
                 if not bodies_dict:
                     return "Паспорта по указанным ссылкам не найдены."
 
@@ -5026,7 +5346,18 @@ async def flash_canary_ota(
       - api_port:        сетевой порт WebSocket API ESPHome (по умолчанию из .env или 6052)
     """
     config_name = resolve_configuration(configuration)
-    logger.info(f"Запуск Canary OTA прошивки {config_name} (порт: {port}, мониторинг: {monitor_seconds}s, откат: {auto_rollback})...")
+    target_port = "OTA" if not port else str(port)
+    logger.info(f"Запуск Canary OTA прошивки {config_name} (порт: {target_port}, мониторинг: {monitor_seconds}s, откат: {auto_rollback})...")
+
+    # Шаг 0. Предварительная проверка безопасности цифровой подписи (Signed OTA Verification)
+    ota_err = await _check_signed_ota_precondition(host, api_port, config_name, target_port)
+    if ota_err:
+        return (
+            f"### 🐥 Результаты безопасной Canary OTA-прошивки (flash_canary_ota)\n\n"
+            f"- **Целевая конфигурация:** `{config_name}` (порт: `{target_port}`)\n"
+            f"- **Итоговый вердикт:** 🔴 **БЛОКИРОВКА БЕЗОПАСНОСТИ (SIGNED OTA SAFETY)**\n\n"
+            f"{ota_err}"
+        )
 
     # Шаг 1. Фиксация Baseline (контрольного снимка)
     baseline_ok, baseline_yaml = await _get_raw_device_config(host, api_port, config_name)

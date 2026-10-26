@@ -76,12 +76,16 @@
 
 ### 🧩 Сценарий 2: Редактирование YAML и добавление компонентов
 
-1. **Чтение текущего YAML или получение ключа шифрования:**
+1. **Чтение текущего YAML, инспекция компонентов или получение ключа шифрования:**
    ```python
    # Получение полного текста конфигурации
    manage_device_config(action="get", configuration="climate-sensor.yaml")
+   # Получение списка всех компонентов, используемых устройством
+   search_components(action="device_components", configuration="climate-sensor.yaml")
    # Получение ключа Native API / OTA шифрования
    manage_device_config(action="key", configuration="climate-sensor.yaml")
+   # Быстрое изменение esphome.friendly_name прямо в YAML без запуска сборки
+   manage_device_config(action="edit_friendly_name", configuration="climate-sensor.yaml", new_friendly_name="Датчик спальни")
    ```
 2. **Проверка совместимости режимов пинов (при использовании расширителей GPIO):**
    ```python
@@ -289,19 +293,19 @@
 |---|---|---|---|
 | `validate_yaml` | Compile/Flash | `configuration` | Быстрая валидация YAML синтаксиса |
 | `compile_firmware` | Compile/Flash | `configuration, force_local` | Компиляция прошивки в ELF/BIN |
-| `flash_ota` | Compile/Flash | `configuration, port, bootloader` | Прошивка готового бинарника (OTA/IP/Serial) |
-| `compile_and_flash` | Compile/Flash | `configuration, port, force_local, bootloader` | Полный цикл сборки и прошивки |
-| `flash_canary_ota` | Canary Deploy | `configuration, port, monitor_seconds, auto_rollback` | Безопасная Canary OTA-прошивка с baseline-снимком, сторожевым мониторингом и авто-откатом при Bootloop |
-| `list_devices` | Monitoring | `host, port` | Список устройств, IP, статусы онлайн и dirty-флаги |
+| `flash_ota` | Compile/Flash | `configuration, port, bootloader` | Прошивка готового бинарника (OTA/IP/Serial) с проверкой Signed OTA |
+| `compile_and_flash` | Compile/Flash | `configuration, port, force_local, bootloader` | Полный цикл сборки и прошивки с проверкой Signed OTA |
+| `flash_canary_ota` | Canary Deploy | `configuration, port, monitor_seconds, auto_rollback` | Безопасная Canary OTA-прошивка с проверкой Signed OTA, baseline-снимком, сторожевым мониторингом и авто-откатом при Bootloop |
+| `list_devices` | Monitoring | `host, port` | Список устройств, IP, статусы онлайн, Signed OTA и dirty-флаги |
 | `stream_device_logs` | Monitoring | `configuration, port, duration_seconds, lines_count, no_states` | Потоковые runtime-логи (OTA/Serial) с опцией фильтрации шума состояний |
 | `decode_crash_backtrace`| Debug | `configuration, lines` | Расшифровка C++ дампов паники и стектрейсов |
 | `search_yaml_configs` | Search | `query, context_lines, case_sensitive` | Полнотекстовый поиск подстроки по всем YAML |
 | `troubleshoot_device` | Network | `configuration, action` (`probe`, `states`) | Глубокая диагностика DNS/mDNS/ICMP RTT |
 | `validate_hardware_pinout` | Hardware Audit | `configuration, content` | Статический и аппаратный аудит GPIO: детекция конфликтов Flash/Strapping/Input-only пинов, шины I2C |
-| `manage_device_config` | YAML CRUD | `action, configuration, content, new_name, board_id, fields, expected...` | CRUD конфигураций, генерация по плате, ключ (`key`), вставка компонентов (`add_component`), CAS, метаданные (`metadata`), импорт (`import`), сокрытие (`ignore`) |
+| `manage_device_config` | YAML CRUD | `action, configuration, content, new_name, new_friendly_name, board_id, fields, expected...` | CRUD конфигураций, генерация по плате, точечное обновление имени в YAML (`edit_friendly_name`), переименование с `new_friendly_name`, ключ (`key`), вставка компонентов (`add_component`), CAS, метаданные (`metadata`), импорт (`import`), сокрытие (`ignore`) |
 | `migrate_device_config` | Migration | `configuration, content, apply` | Автомиграция устаревшего YAML синтаксиса |
 | `manage_automations` | AST Automations| `action, configuration, component_id, trigger, automation, expected, apply` | Парсинг и мутация автоматизаций, каталоги эффектов/фильтров, паспорта схем |
-| `search_components` | Catalog | `action, query, category, platform, component_id...` | База >940 компонентов, зависимости шин, режимы пинов |
+| `search_components` | Catalog | `action, query, category, platform, component_id, configuration...` | База >940 компонентов, зависимости шин, режимы пинов, инспекция всех компонентов устройства (`device_components`) |
 | `manage_secrets` | Secrets | `action, key, value, ssid, psk, overwrite` | Безопасное управление `secrets.yaml` и Wi-Fi с защитой перезаписи |
 | `manage_labels` | Labels | `action, label_id, name, color` | CRUD каталога меток (тегов) парка |
 | `batch_manage_devices` | Batch | `action, configurations, label_ids, updates` | Пакетная архивация, удаление и установка меток |

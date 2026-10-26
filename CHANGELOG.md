@@ -11,6 +11,30 @@
 
 ---
 
+## [1.18.0] - 2026-10-26
+
+### Added (Актуализация API 2026.10 — Этап 4: Signed OTA, Friendly Name & Device Components)
+- **Точечное обновление дружественного имени в YAML (`manage_device_config(action="edit_friendly_name")`)**:
+  - Поддержка новой команды WebSocket API `devices/edit_friendly_name` (`{configuration, new_friendly_name}`).
+  - Атомарная перезапись поля `esphome.friendly_name` непосредственно в YAML-файле без запуска фоновых задач сборки и прошивки (с возвратом статуса `rewritten`).
+- **Атомарное переименование с обновлением `friendly_name` (`manage_device_config(action="rename")`)**:
+  - Поддержка нового параметра `new_friendly_name` (или `friendly_name`) в команде `devices/rename` для одновременного переименования файла/hostname и отображаемого имени в одной цепочке записи.
+- **Защита цифровой подписи прошивки (Hardware & Signed OTA Verification Safety)**:
+  - В инструменты `flash_ota`, `compile_and_flash` и `flash_canary_ota` добавлен пре-чек флагов `runtime_state.ota_signed` и `ota_signing_key` через `evaluate_signed_ota_safety`.
+  - Автоматическая блокировка небезопасной сетевой OTA-прошивки в случае, когда микроконтроллер вещает `ota_signed=True`, но в YAML-конфигурации отсутствует ключ подписи (`ota_signing_key=False`), с рекомендацией прошивки по USB/Serial или добавления `signing_key`.
+  - Отображение статуса `Signed OTA` в выводе `list_devices`.
+- **Инспекция компонентов конкретного устройства (`search_components(action="device_components")`)**:
+  - Новый режим `action="device_components"` (и алиас `"config_components"`) с параметром `configuration` в инструменте `search_components` (аналог `get_config_components`).
+  - Автоматический сбор используемых устройством компонентов из метаданных сканера (`component_ids`, `loaded_platforms`, `loaded_integrations`) и прямого парсинга YAML (`extract_yaml_component_ids`) с обогащением описаниями, зависимостями и ссылками на документацию из каталога `components/get_component_bodies`.
+
+### Fixed
+- **Локальная валидация в `manage_automations(action="docs")`**:
+  - Проверка обязательного параметра `refs` вынесена до открытия WebSocket-соединения; добавлена поддержка пагинированного ответа `{bodies, remaining}` в `automations/get_bodies`.
+- **Документация и тесты**:
+  - Исправлены ссылки на корневой `AGENTS.md` в `ROADMAP.md`.
+  - Тестовый набор в `test/test_mcp_server.py` расширен до 25 модульных и 37 интеграционных тестов (всего 62 теста).
+
+---
 ## [1.17.0] - 2026-10-02
 
 ### Added (Фаза 5.3.1: Canary OTA-прошивка с авто-откатом при Bootloop)

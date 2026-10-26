@@ -17,14 +17,14 @@
   - **Фаза 4 (MCP Native):** Динамические ресурсы (`esphome://devices`, `esphome://configs/{configuration}`, `esphome://components/{component_id}`, `esphome://boards/{board_id}`) и интерактивные промпты (`new_device_wizard`, `troubleshoot_offline_device`, `safe_firmware_upgrade`).
   - **Фаза 5.1 (Hardware Intelligence, v1.16.0):** Аппаратный аудит распиновки GPIO (`validate_hardware_pinout`), проверка SPI Flash, Input-only, Strapping пинов, повторных назначений и коллизий адресов I2C шины.
   - **Фаза 5.3 (Canary Deployment & Auto-Rollback, v1.17.0):** Безопасная Canary OTA-прошивка (`flash_canary_ota`) со сторожевым мониторингом запуска (Canary Watchdog) и автоматическим откатом при Guru Meditation / Bootloop / Safe Mode.
-  - **Программа актуализации API (2026.10):** Полностью завершены **Этап 1** (v1.12.1), **Этап 2** (v1.13.0) и **Этап 3** (v1.14.0) — синхронизированы все 29 инструментов с официальной спецификацией API.
+  - **Программа актуализации API (2026.10):** Полностью завершены **Этап 1** (v1.12.1), **Этап 2** (v1.13.0), **Этап 3** (v1.14.0) и **Этап 4** (v1.18.0) — синхронизированы все 29 инструментов с актуальной спецификацией API (включая `devices/edit_friendly_name`, `new_friendly_name` в `devices/rename`, защиту Signed OTA и инспекцию компонентов устройства `device_components`).
 
 ---
 
 ## 📋 Инструкция для AI-агентов по выполнению задач
 
 1. Перед началом работы над пунктом изучите спецификацию соответствующей команды в [ESPHome API.md](https://raw.githubusercontent.com/esphome/device-builder/main/docs/API.md).
-2. Соблюдайте критические правила разработки из [`.agents/AGENTS.md`](file:///.agents/AGENTS.md):
+2. Соблюдайте критические правила разработки из [`AGENTS.md`](file:///AGENTS.md):
    - Все логи только в `sys.stderr` (никаких `print()` в stdout).
    - Корректная обработка событий `output`/`result` в потоковых командах.
    - Поддержка параметров `host` и `port` во всех инструментах.
@@ -32,7 +32,7 @@
 3. После реализации функционала:
    - Добавьте/обновите тесты в [`test/test_mcp_server.py`](file:///test/test_mcp_server.py).
    - Запустите тесты: `.venv/bin/python3 test/test_mcp_server.py`.
-   - Актуализируйте документацию в [`README.md`](file:///README.md) и [`.agents/AGENTS.md`](file:///.agents/AGENTS.md).
+   - Актуализируйте документацию в [`README.md`](file:///README.md) и [`AGENTS.md`](file:///AGENTS.md).
    - **Отметьте выполненный пункт зеленым чекбоксом `[x] ✅` в этом файле (`ROADMAP.md`).**
 
 ---
@@ -353,9 +353,27 @@
 
 ---
 
+### 🛡️ Этап 4: Свежие обновления спецификации API (2026.10 — Signed OTA, Friendly Name & Device Components)
+
+- [x] ✅ **4.1. Точечное обновление отображаемого имени в YAML (`devices/edit_friendly_name`)**
+  - **Команда API:** `devices/edit_friendly_name` (`{configuration, new_friendly_name}`).
+  - **Описание:** Реализовано действие `manage_device_config(action="edit_friendly_name")` для перезаписи `esphome.friendly_name` непосредственно в YAML-файле без запуска задач сборки и прошивки.
+- [x] ✅ **4.2. Атомарное обновление `new_friendly_name` при переименовании (`devices/rename`)**
+  - **Команда API:** `devices/rename` (`{configuration, new_name, config_only?, new_friendly_name?}`).
+  - **Описание:** Поддержка опционального аргумента `new_friendly_name` при переименовании устройства через `manage_device_config(action="rename")`.
+- [x] ✅ **4.3. Аппаратная защита прошивки с цифровой подписью (Signed OTA Verification Safety)**
+  - **Поля API:** `Device.runtime_state.ota_signed`, `Device.ota_signing_key`.
+  - **Описание:** Пре-чек безопасности в `flash_ota`, `compile_and_flash` и `flash_canary_ota` (`evaluate_signed_ota_safety`), блокирующий отправку неподписанного OTA-образа на микроконтроллер с активным `ota_signed=True` и направляющий прошивку на USB/Serial или добавление `signing_key`.
+- [x] ✅ **4.4. Инспекция компонентов конфигурации устройства (`get_config_components`)**
+  - **Команды API:** `devices/list` (`component_ids`, `loaded_platforms`, `loaded_integrations`), `devices/get_config`, `components/get_component_bodies`.
+  - **Описание:** Реализовано действие `search_components(action="device_components", configuration=...)` с парсером `extract_yaml_component_ids` и обогащением из каталога компонентов.
+
+---
+
 ## 📈 Журнал обновлений дорожной карты
 
 | Дата | Версия | Описание изменений |
+| **2026-10-26** | `1.18.0` | **Завершен Этап 4 актуализации API (2026.10):** реализованы `manage_device_config(action="edit_friendly_name")` (`devices/edit_friendly_name`), параметр `new_friendly_name` в `devices/rename`, пре-чек безопасности цифровой подписи прошивки `Signed OTA` (`ota_signed` / `ota_signing_key`) в `flash_ota`, `compile_and_flash`, `flash_canary_ota` и `list_devices`, а также инспекция компонентов устройства `search_components(action="device_components")`. Исправлена локальная валидация `refs` в `manage_automations(action="docs")`. Добавлены новые модульные и интеграционные тесты. |
 | **2026-10-02** | `1.17.0` | **Завершена Фаза 5.3 (Canary OTA & Auto-Rollback):** реализован инструмент `flash_canary_ota` (Инструмент №29) для двухэтапной безопасной Canary-прошивки с baseline-снимком, сторожевым мониторингом запуска (Canary Watchdog), авто-детекцией паники ядра/WDT/бутлупа и экстренным авто-откатом (Auto-Rollback) прошивки через технологическое окно Safe Mode. Добавлены unit и интеграционные тесты. |
 | **2026-10-02** | `1.16.0` | **Завершена Фаза 5.1 (Hardware Intelligence):** реализован инструмент `validate_hardware_pinout` (Инструмент №28) для интеллектуального статического и аппаратного аудита GPIO (SPI Flash, Input-only, повторные назначения, коллизии адресов I2C, Strapping/ADC2 пины). Добавлены тесты. |
 | **2026-10-02** | `1.15.0` | **Завершена Фаза 4 (MCP Resources & Prompts):** реализованы контекстные динамические ресурсы протокола MCP (`esphome://devices`, `esphome://configs/{configuration}`, `esphome://components/{component_id}`, `esphome://boards/{board_id}`) и интерактивные стандартизированные промпты (`new_device_wizard`, `troubleshoot_offline_device`, `safe_firmware_upgrade`). Тестовый комплекс расширен. |
