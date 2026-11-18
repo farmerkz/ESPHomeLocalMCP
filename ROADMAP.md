@@ -24,15 +24,15 @@
 ## 📋 Инструкция для AI-агентов по выполнению задач
 
 1. Перед началом работы над пунктом изучите спецификацию соответствующей команды в [ESPHome API.md](https://raw.githubusercontent.com/esphome/device-builder/main/docs/API.md).
-2. Соблюдайте критические правила разработки из [`AGENTS.md`](file:///AGENTS.md):
+2. Соблюдайте критические правила разработки из [`AGENTS.md`](AGENTS.md):
    - Все логи только в `sys.stderr` (никаких `print()` в stdout).
    - Корректная обработка событий `output`/`result` в потоковых командах.
    - Поддержка параметров `host` и `port` во всех инструментах.
    - Нормализация параметра `configuration` через `resolve_configuration`.
 3. После реализации функционала:
-   - Добавьте/обновите тесты в [`test/test_mcp_server.py`](file:///test/test_mcp_server.py).
+   - Добавьте/обновите тесты в [`test/test_mcp_server.py`](test/test_mcp_server.py).
    - Запустите тесты: `.venv/bin/python3 test/test_mcp_server.py`.
-   - Актуализируйте документацию в [`README.md`](file:///README.md) и [`AGENTS.md`](file:///AGENTS.md).
+   - Актуализируйте документацию в [`README.md`](README.md) и [`AGENTS.md`](AGENTS.md).
    - **Отметьте выполненный пункт зеленым чекбоксом `[x] ✅` в этом файле (`ROADMAP.md`).**
 
 ---
